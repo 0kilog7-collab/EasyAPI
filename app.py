@@ -153,12 +153,13 @@ def snusbase(query, search_type):
             return {"source": "Snusbase", "data": r.json()}
         return {"source": "Snusbase", "error": r.status_code}
     except:
-        return {"source": "Snusbase", "error": "timeout"}
+        return {"source": "Snusbase", "error": 504}
 
 def ofdata(query, search_type):
     q = str(query).strip()
     headers = {"User-Agent": "Mozilla/5.0"}
     collected_data = {}
+    status_code = 404
 
     if search_type == "inn":
         digits = re.sub(r'[^\d]', '', q)
@@ -166,31 +167,34 @@ def ofdata(query, search_type):
             url = f"{OFDATA_BASE}/person?key={OFDATA_KEY}&inn={digits}"
             try:
                 r = requests.get(url, headers=headers, timeout=10)
+                status_code = r.status_code
                 if r.status_code == 200:
                     collected_data["person_info"] = r.json()
             except:
-                pass
+                status_code = 504
         elif len(digits) == 10:
             for endpoint in ["company", "bank"]:
                 url = f"{OFDATA_BASE}/{endpoint}?key={OFDATA_KEY}&inn={digits}"
                 try:
                     r = requests.get(url, headers=headers, timeout=10)
+                    status_code = r.status_code
                     if r.status_code == 200:
                         collected_data[f"{endpoint}_info"] = r.json()
                 except:
-                    pass
+                    status_code = 504
     elif search_type in ["text", "фио", "fio"]:
         url = f"{OFDATA_BASE}/search?key={OFDATA_KEY}&query={requests.utils.quote(q)}"
         try:
             r = requests.get(url, headers=headers, timeout=12)
+            status_code = r.status_code
             if r.status_code == 200:
                 collected_data["search_results"] = r.json()
         except:
-            pass
+            status_code = 504
 
     if collected_data:
         return {"source": "Ofdata", "data": collected_data}
-    return {"source": "Ofdata", "error": "no_data_found"}
+    return {"source": "Ofdata", "error": status_code}
 
 def infinity_check(query, search_type):
     try:
@@ -224,9 +228,9 @@ def infinity_check(query, search_type):
             except:
                 res_data = r.text
             return {"source": "InfinityCheck", "data": res_data}
-        return {"source": "InfinityCheck", "error": f"HTTP status {r.status_code}"}
-    except Exception as e:
-        return {"source": "InfinityCheck", "error": str(e)}
+        return {"source": "InfinityCheck", "error": r.status_code}
+    except:
+        return {"source": "InfinityCheck", "error": 504}
 
 def lookup_phone_via_seon(query):
     try:
@@ -235,16 +239,15 @@ def lookup_phone_via_seon(query):
             "X-API-KEY": SEON_KEY,
             "Content-Type": "application/json"
         }
-        # Исправлено: SEON требует POST-метод и данные внутри JSON-body
         payload = {
             "phone": clean_phone
         }
         r = requests.post(SEON_URL, headers=headers, json=payload, timeout=15)
         if r.status_code == 200:
             return {"source": "SEON", "data": r.json()}
-        return {"source": "SEON", "error": f"HTTP status {r.status_code}"}
-    except Exception as e:
-        return {"source": "SEON", "error": str(e)}
+        return {"source": "SEON", "error": r.status_code}
+    except:
+        return {"source": "SEON", "error": 504}
 
 def lookup_vk(query):
     try:
@@ -258,9 +261,9 @@ def lookup_vk(query):
         r = requests.get(url, params=params, timeout=15)
         if r.status_code == 200:
             return {"source": "VK", "data": r.json()}
-        return {"source": "VK", "error": f"HTTP status {r.status_code}"}
-    except Exception as e:
-        return {"source": "VK", "error": str(e)}
+        return {"source": "VK", "error": r.status_code}
+    except:
+        return {"source": "VK", "error": 504}
 
 def lookup_shodan(query):
     try:
@@ -269,18 +272,18 @@ def lookup_shodan(query):
         params = {"key": SHODAN_KEY}
         r = requests.get(url, params=params, timeout=15)
         
-        # Исправлено: Если ключ заблокирован/не имеет прав (403), переключаемся на бесплатную базу без токена
         if r.status_code == 403:
             fallback_url = f"https://internetdb.shodan.io/{ip}"
             r_fallback = requests.get(fallback_url, timeout=10)
             if r_fallback.status_code == 200:
                 return {"source": "Shodan (InternetDB Fallback)", "data": r_fallback.json()}
+            return {"source": "Shodan", "error": r_fallback.status_code}
                 
         if r.status_code == 200:
             return {"source": "Shodan", "data": r.json()}
-        return {"source": "Shodan", "error": f"HTTP status {r.status_code}"}
-    except Exception as e:
-        return {"source": "Shodan", "error": str(e)}
+        return {"source": "Shodan", "error": r.status_code}
+    except:
+        return {"source": "Shodan", "error": 504}
 
 @app.route('/key/create', methods=['POST', 'GET'])
 def create_key():

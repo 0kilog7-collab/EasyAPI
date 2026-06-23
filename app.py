@@ -9,9 +9,11 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 app = Flask(__name__)
-
+app.config['MAX_CONTENT_LENGTH'] = None
 app.config['JSON_AS_ASCII'] = False
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
 try:
@@ -20,18 +22,67 @@ try:
 except AttributeError:
     pass
 
-# ============ ВСЕ КЛЮЧИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ============
-MASTER_KEY = os.environ.get("MASTER_KEY")
-SNUSBASE_KEY = os.environ.get("SNUSBASE_KEY")
-OFDATA_KEY = os.environ.get("OFDATA_KEY")
-INFINITY_KEY = os.environ.get("INFINITY_KEY")
-SEON_KEY = os.environ.get("SEON_KEY")
-VK_TOKEN = os.environ.get("VK_TOKEN")
-SHODAN_KEY = os.environ.get("SHODAN_KEY")
+@app.after_request
+def add_security_headers(response):
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    response.headers['Permissions-Policy'] = 'geolocation=(), microphone=(), camera=()'
+    response.headers['Content-Security-Policy'] = "default-src 'none'; script-src 'self'; connect-src 'self' https://api.*; img-src 'self' data:; style-src 'self' 'unsafe-inline'"
+    return response
+
+def get_real_ip():
+    forwarded = request.headers.get('X-Forwarded-For')
+    if forwarded:
+        return forwarded.split(',')[0].strip()
+    return request.remote_addr or '127.0.0.1'
+
+banned_ips = {}
+
+def is_ip_banned(ip):
+    if ip in banned_ips:
+        if datetime.now() < banned_ips[ip]:
+            return True
+        else:
+            del banned_ips[ip]
+    return False
+
+def ban_ip(ip, days=30):
+    banned_ips[ip] = datetime.now() + timedelta(days=days)
+
+limiter = Limiter(
+    key_func=get_real_ip,
+    app=app,
+    default_limits=["200 per day", "50 per hour"],
+    storage_uri="memory://"
+)
+
+@app.errorhandler(429)
+def ratelimit_handler(e):
+    ip = get_real_ip()
+    ban_ip(ip, 30)
+    return jsonify({"error": "Too many requests. You are banned for 30 days."}), 429
+
+def sanitize_query(query):
+    if not query:
+        return query
+    return re.sub(r'[^a-zA-Z0-9\s@\.\-_+:яёА-ЯЁ]', '', query)
+
+failed_attempts = {}
+
+MASTER_KEY = "hsjdjfhrnjdjd72jrhfbsbxjdndn772hdjd92hrjdjx72nrkfusk8qkrklmrwoco52jrmfn95eufjr"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 KEYS_FILE = os.path.join(BASE_DIR, "api_keys.json")
 LOG_FILE = os.path.join(BASE_DIR, "keys_log.txt")
+
+SNUSBASE_KEY = "sb5029dec66mht55m78fx8bsw6tm8a"
+OFDATA_KEY = "DiC9ALodH5T12BfR"
+INFINITY_KEY = "N7xQ4Lp2ZWk8F5VcD1mR9H6TyU3E0BJa"
+SEON_KEY = "758f5f54-befb-4125-bd17-931689af6633"
+VK_TOKEN = "0af157510af157510af15751aa0a89e69600af10af157516a0bc15996e74fe2b440998c"
+SHODAN_KEY = "xx6gSg9pWYmJcND1hEMbcWuOJtjbHSZ5"
 
 SNUSBASE_URL = "https://api.snusbase.com/data/search"
 OFDATA_BASE = "https://api.ofdata.ru/v2"
@@ -100,13 +151,23 @@ def save_keys_to_file():
         pass
 
 def check_auth():
+    ip = get_real_ip()
+    
+    if is_ip_banned(ip):
+        return False
+    
     auth_key = request.headers.get("X-API-Key") or request.args.get("api_key")
-    if not auth_key and request.is_json:
-        data = request.get_json(silent=True)
-        if data:
-            auth_key = data.get("api_key")
-            
+    
+    if ip in failed_attempts and failed_attempts[ip] >= 15:
+        ban_ip(ip, 30)
+        return False
+    
+    if not auth_key:
+        failed_attempts[ip] = failed_attempts.get(ip, 0) + 1
+        return False
+    
     if auth_key == MASTER_KEY:
+        failed_attempts[ip] = 0
         return True
         
     if auth_key in ALLOWED_KEYS:
@@ -117,10 +178,13 @@ def check_auth():
                 log_msg = f"[EXPIRED LOG] [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Ключ '{auth_key}' заблокирован ({expires_at_str})."
                 write_to_log(log_msg)
                 return False
+        failed_attempts[ip] = 0
         return True
+    
+    failed_attempts[ip] = failed_attempts.get(ip, 0) + 1
     return False
 
-SUPPORTED_PARAMS = ['pass', 'email', 'inn', 'text', 'фио', 'fio', 'phone', 'vkid', 'ip']
+SUPPORTED_PARAMS = ['pass', 'email', 'inn', 'text', 'фио', 'fio', 'phone', 'vkid', 'ip', 'snils', 'passport', 'ogrn', 'company']
 
 def detect_type(query):
     q = str(query).strip()
@@ -136,6 +200,14 @@ def detect_type(query):
         return "phone"
     if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', q):
         return "ip"
+    if re.match(r'^[0-9]{4}\s?[0-9]{6}$', q) or re.match(r'^[А-Я]{2}\s?[0-9]{7}$', q):
+        return "passport"
+    if re.match(r'^[0-9]{3}-?[0-9]{3}-?[0-9]{3}-?[0-9]{2}$', q):
+        return "snils"
+    if re.match(r'^\d{13}$', q):
+        return "ogrn"
+    if re.match(r'^[А-ЯЁA-Z][а-яёa-zА-ЯЁA-Z0-9\s\-\.\,]+$', q) and len(q) > 3:
+        return "company"
     
     return "text"
 
@@ -161,36 +233,66 @@ def ofdata(query, search_type):
     collected_data = {}
     status_code = 404
 
-    if search_type == "inn":
-        digits = re.sub(r'[^\d]', '', q)
-        if len(digits) == 12:
-            url = f"{OFDATA_BASE}/person?key={OFDATA_KEY}&inn={digits}"
-            try:
-                r = requests.get(url, headers=headers, timeout=10)
-                status_code = r.status_code
-                if r.status_code == 200:
-                    collected_data["person_info"] = r.json()
-            except:
-                status_code = 504
-        elif len(digits) == 10:
-            for endpoint in ["company", "bank"]:
-                url = f"{OFDATA_BASE}/{endpoint}?key={OFDATA_KEY}&inn={digits}"
-                try:
-                    r = requests.get(url, headers=headers, timeout=10)
-                    status_code = r.status_code
-                    if r.status_code == 200:
-                        collected_data[f"{endpoint}_info"] = r.json()
-                except:
-                    status_code = 504
-    elif search_type in ["text", "фио", "fio"]:
-        url = f"{OFDATA_BASE}/search?key={OFDATA_KEY}&query={requests.utils.quote(q)}"
+    type_map = {
+        "inn": ("person", "inn"),
+        "phone": ("search", "phone"),
+        "email": ("search", "email"),
+        "passport": ("person", "passport"),
+        "snils": ("person", "snils"),
+        "fio": ("search", "fio"),
+        "фио": ("search", "fio"),
+        "ogrn": ("company", "ogrn"),
+        "company": ("company", "query"),
+        "text": ("search", "query")
+    }
+
+    endpoint, param = type_map.get(search_type, ("search", "query"))
+    
+    if search_type == "company":
+        if re.match(r'^\d{10}$|^\d{12}$', q):
+            url = f"{OFDATA_BASE}/company?key={OFDATA_KEY}&inn={q}"
+        elif re.match(r'^\d{13}$', q):
+            url = f"{OFDATA_BASE}/company?key={OFDATA_KEY}&ogrn={q}"
+        else:
+            url = f"{OFDATA_BASE}/company?key={OFDATA_KEY}&query={requests.utils.quote(q)}"
         try:
             r = requests.get(url, headers=headers, timeout=12)
             status_code = r.status_code
             if r.status_code == 200:
-                collected_data["search_results"] = r.json()
+                collected_data["company_info"] = r.json()
         except:
             status_code = 504
+        return {"source": "Ofdata", "data": collected_data} if collected_data else {"source": "Ofdata", "error": status_code}
+
+    if search_type in ["fio", "фио"]:
+        parts = q.split()
+        if len(parts) >= 2:
+            params = {
+                "key": OFDATA_KEY,
+                "first_name": parts[0],
+                "last_name": parts[1],
+                "middle_name": parts[2] if len(parts) > 2 else ""
+            }
+            url = f"{OFDATA_BASE}/search"
+            try:
+                r = requests.get(url, headers=headers, params=params, timeout=12)
+                status_code = r.status_code
+                if r.status_code == 200:
+                    collected_data["search_results"] = r.json()
+            except:
+                status_code = 504
+            return {"source": "Ofdata", "data": collected_data} if collected_data else {"source": "Ofdata", "error": status_code}
+
+    params = {"key": OFDATA_KEY, param: q}
+    url = f"{OFDATA_BASE}/{endpoint}"
+    
+    try:
+        r = requests.get(url, headers=headers, params=params, timeout=12)
+        status_code = r.status_code
+        if r.status_code == 200:
+            collected_data["result"] = r.json()
+    except:
+        status_code = 504
 
     if collected_data:
         return {"source": "Ofdata", "data": collected_data}
@@ -214,7 +316,7 @@ def infinity_check(query, search_type):
             param_name = "phone"
         elif search_type == "email":
             param_name = "email"
-        elif search_type in ["text", "фио", "fio"]:
+        elif search_type in ["text", "фио", "fio", "company"]:
             param_name = "fio"
             
         if not param_name:
@@ -286,6 +388,7 @@ def lookup_shodan(query):
         return {"source": "Shodan", "error": 504}
 
 @app.route('/key/create', methods=['POST', 'GET'])
+@limiter.limit("5 per minute")
 def create_key():
     master = request.headers.get("X-Master-Key") or request.args.get("master_key")
     if not master and request.is_json:
@@ -335,6 +438,7 @@ def create_key():
     })
 
 @app.route('/key/delete', methods=['POST', 'GET'])
+@limiter.limit("5 per minute")
 def delete_key():
     master = request.headers.get("X-Master-Key") or request.args.get("master_key")
     if not master and request.is_json:
@@ -363,6 +467,7 @@ def delete_key():
     return jsonify({"success": True, "message": "Removed."})
 
 @app.route('/key/list', methods=['GET'])
+@limiter.limit("5 per minute")
 def list_keys():
     master = request.headers.get("X-Master-Key") or request.args.get("master_key")
     if master != MASTER_KEY:
@@ -370,8 +475,12 @@ def list_keys():
     return jsonify({"allowed_api_keys": ALLOWED_KEYS})
 
 @app.route('/search', methods=['POST', 'GET'])
+@limiter.limit("10 per minute")
 def search():
     if not check_auth():
+        ip = get_real_ip()
+        if is_ip_banned(ip):
+            return jsonify({"error": "Your IP is banned for 30 days."}), 403
         return jsonify({"error": "Unauthorized."}), 401
 
     query = None
@@ -399,6 +508,8 @@ def search():
     if not query:
         return jsonify({"error": "Missing search term"}), 400
     
+    query = sanitize_query(query)
+    
     if not search_type:
         search_type = detect_type(query)
         
@@ -414,10 +525,10 @@ def search():
         if search_type in ["email", "pass"]:
             futures[executor.submit(snusbase, query, search_type)] = "sn"
             
-        if search_type in ["inn", "text", "фио", "fio"]:
+        if search_type in ["inn", "text", "фио", "fio", "snils", "passport", "ogrn", "company"]:
             futures[executor.submit(ofdata, query, search_type)] = "of"
             
-        if search_type in ["phone", "email", "text", "фио", "fio"]:
+        if search_type in ["phone", "email", "text", "фио", "fio", "company"]:
             futures[executor.submit(infinity_check, query, search_type)] = "inf"
 
         if search_type == "phone":
@@ -442,7 +553,7 @@ def home():
     return jsonify({
         "name": "EasyApi",
         "author": "@y3Huk_iphone",
-        "sources": ["Secret", "Secret", "Secret", "Secret", "Secret", "Secret"]
+        "sources": ["Secret", "Secret", "Secret", "Seacret", "Secret", "Secret"]
     })
 
 if __name__ == "__main__":

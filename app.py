@@ -86,7 +86,7 @@ SHODAN_KEY = "xx6gSg9pWYmJcND1hEMbcWuOJtjbHSZ5"
 
 SNUSBASE_URL = "https://api.snusbase.com/data/search"
 OFDATA_BASE = "https://api.ofdata.ru/v2"
-INFINITY_URL = "https://infinity-check.online/find.php"
+INFINITY_URL = "https://infinity-search.fun/find.php"
 SEON_URL = "https://api.seon.io/SeonRestService/phone-api/v2"
 SHODAN_BASE_URL = "https://api.shodan.io"
 

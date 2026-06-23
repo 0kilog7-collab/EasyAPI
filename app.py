@@ -20,18 +20,18 @@ try:
 except AttributeError:
     pass
 
-MASTER_KEY = "hsjdjfhrnjdjd72jrhfbsbxjdndn772hdjd92hrjdjx72nrkfusk8qkrklmrwoco52jrmfn95eufjr"
+# ============ ВСЕ КЛЮЧИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ============
+MASTER_KEY = os.environ.get("MASTER_KEY")
+SNUSBASE_KEY = os.environ.get("SNUSBASE_KEY")
+OFDATA_KEY = os.environ.get("OFDATA_KEY")
+INFINITY_KEY = os.environ.get("INFINITY_KEY")
+SEON_KEY = os.environ.get("SEON_KEY")
+VK_TOKEN = os.environ.get("VK_TOKEN")
+SHODAN_KEY = os.environ.get("SHODAN_KEY")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 KEYS_FILE = os.path.join(BASE_DIR, "api_keys.json")
 LOG_FILE = os.path.join(BASE_DIR, "keys_log.txt")
-
-SNUSBASE_KEY = "sb5029dec66mht55m78fx8bsw6tm8a"
-OFDATA_KEY = "DiC9ALodH5T12BfR"
-INFINITY_KEY = "N7xQ4Lp2ZWk8F5VcD1mR9H6TyU3E0BJa"
-SEON_KEY = "758f5f54-befb-4125-bd17-931689af6633"
-VK_TOKEN = "0af157510af157510af15751aa0a89e69600af10af157516a0bc15996e74fe2b440998c"
-SHODAN_KEY = "xx6gSg9pWYmJcND1hEMbcWuOJtjbHSZ5"
 
 SNUSBASE_URL = "https://api.snusbase.com/data/search"
 OFDATA_BASE = "https://api.ofdata.ru/v2"
@@ -442,7 +442,7 @@ def home():
     return jsonify({
         "name": "EasyApi",
         "author": "@y3Huk_iphone",
-        "sources": ["Snusbase", "Ofdata", "InfinityCheck", "SEON", "VK", "Shodan"]
+        "sources": ["Secret", "Secret", "Secret", "Secret", "Secret", "Secret"]
     })
 
 if __name__ == "__main__":

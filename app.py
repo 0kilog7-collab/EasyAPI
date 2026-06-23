@@ -77,7 +77,10 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 KEYS_FILE = os.path.join(BASE_DIR, "api_keys.json")
 LOG_FILE = os.path.join(BASE_DIR, "keys_log.txt")
 
-SNUSBASE_KEY = "sb5029dec66mht55m78fx8bsw6tm8a"
+SNUSBASE_KEYS = [
+    "sb5029dec66mht55m78fx8bsw6tm8a",
+    "sbmeovhou6ecsn9fd9wcwnwwvsvwnc"
+]
 OFDATA_KEY = "DiC9ALodH5T12BfR"
 INFINITY_KEY = "N7xQ4Lp2ZWk8F5VcD1mR9H6TyU3E0BJa"
 SEON_KEY = "758f5f54-befb-4125-bd17-931689af6633"
@@ -212,20 +215,36 @@ def detect_type(query):
     return "text"
 
 def snusbase(query, search_type):
-    try:
-        headers = {"Content-Type": "application/json", "Auth": SNUSBASE_KEY}
-        snus_type = "password" if search_type == "pass" else "email"
-        payload = {
-            "terms": [str(query).strip()],
-            "types": [snus_type],
-            "wildcard": False
-        }
-        r = requests.post(SNUSBASE_URL, headers=headers, json=payload, timeout=15)
-        if r.status_code == 200:
-            return {"source": "Snusbase", "data": r.json()}
-        return {"source": "Snusbase", "error": r.status_code}
-    except:
-        return {"source": "Snusbase", "error": 504}
+    q = str(query).strip()
+    snus_type = "password" if search_type == "pass" else "email"
+    payload = {
+        "terms": [q],
+        "types": [snus_type],
+        "wildcard": False
+    }
+    
+    for idx, key in enumerate(SNUSBASE_KEYS):
+        try:
+            headers = {"Content-Type": "application/json", "Auth": key}
+            r = requests.post(
+                SNUSBASE_URL,
+                headers=headers,
+                json=payload,
+                timeout=8
+            )
+            
+            if r.status_code == 200:
+                return {"source": "Snusbase", "data": r.json()}
+            
+            if r.status_code in [402, 429]:
+                continue
+            
+            return {"source": "Snusbase", "error": r.status_code}
+            
+        except:
+            continue
+    
+    return {"source": "Snusbase", "error": "All keys exhausted"}
 
 def ofdata(query, search_type):
     q = str(query).strip()
@@ -256,7 +275,7 @@ def ofdata(query, search_type):
         else:
             url = f"{OFDATA_BASE}/company?key={OFDATA_KEY}&query={requests.utils.quote(q)}"
         try:
-            r = requests.get(url, headers=headers, timeout=12)
+            r = requests.get(url, headers=headers, timeout=8)
             status_code = r.status_code
             if r.status_code == 200:
                 collected_data["company_info"] = r.json()
@@ -275,7 +294,7 @@ def ofdata(query, search_type):
             }
             url = f"{OFDATA_BASE}/search"
             try:
-                r = requests.get(url, headers=headers, params=params, timeout=12)
+                r = requests.get(url, headers=headers, params=params, timeout=8)
                 status_code = r.status_code
                 if r.status_code == 200:
                     collected_data["search_results"] = r.json()
@@ -287,7 +306,7 @@ def ofdata(query, search_type):
     url = f"{OFDATA_BASE}/{endpoint}"
     
     try:
-        r = requests.get(url, headers=headers, params=params, timeout=12)
+        r = requests.get(url, headers=headers, params=params, timeout=8)
         status_code = r.status_code
         if r.status_code == 200:
             collected_data["result"] = r.json()
@@ -323,7 +342,7 @@ def infinity_check(query, search_type):
             return None
 
         params = {param_name: q, "token": INFINITY_KEY}
-        r = session.get(INFINITY_URL, headers=headers, params=params, timeout=(5, 25))
+        r = session.get(INFINITY_URL, headers=headers, params=params, timeout=(3, 8))
         if r.status_code == 200:
             try:
                 res_data = r.json()
@@ -344,7 +363,7 @@ def lookup_phone_via_seon(query):
         payload = {
             "phone": clean_phone
         }
-        r = requests.post(SEON_URL, headers=headers, json=payload, timeout=15)
+        r = requests.post(SEON_URL, headers=headers, json=payload, timeout=8)
         if r.status_code == 200:
             return {"source": "SEON", "data": r.json()}
         return {"source": "SEON", "error": r.status_code}
@@ -360,7 +379,7 @@ def lookup_vk(query):
             "v": "5.199",
             "fields": "first_name,last_name,bdate,city,country,contacts,online"
         }
-        r = requests.get(url, params=params, timeout=15)
+        r = requests.get(url, params=params, timeout=8)
         if r.status_code == 200:
             return {"source": "VK", "data": r.json()}
         return {"source": "VK", "error": r.status_code}
@@ -372,11 +391,11 @@ def lookup_shodan(query):
         ip = str(query).strip()
         url = f"{SHODAN_BASE_URL}/shodan/host/{ip}"
         params = {"key": SHODAN_KEY}
-        r = requests.get(url, params=params, timeout=15)
+        r = requests.get(url, params=params, timeout=8)
         
         if r.status_code == 403:
             fallback_url = f"https://internetdb.shodan.io/{ip}"
-            r_fallback = requests.get(fallback_url, timeout=10)
+            r_fallback = requests.get(fallback_url, timeout=8)
             if r_fallback.status_code == 200:
                 return {"source": "Shodan (InternetDB Fallback)", "data": r_fallback.json()}
             return {"source": "Shodan", "error": r_fallback.status_code}
@@ -512,11 +531,12 @@ def search():
     
     if not search_type:
         search_type = detect_type(query)
-        
+    
     result = {
         "query": query,
         "type": search_type,
-        "sources": []
+        "found": False,
+        "data": None
     }
     
     with ThreadPoolExecutor(max_workers=5) as executor:
@@ -540,21 +560,28 @@ def search():
         if search_type == "ip":
             futures[executor.submit(lookup_shodan, query)] = "shodan"
             
+        all_data = []
         for future in as_completed(futures):
             res = future.result()
-            if res and ("data" in res or "error" in res):
-                result["sources"].append(res)
+            if res and "data" in res:
+                all_data.append(res["data"])
+        
+        if all_data:
+            result["found"] = True
+            result["data"] = all_data
+        else:
+            result["found"] = False
+            result["data"] = None
     
-    result["found"] = len([s for s in result["sources"] if "data" in s]) > 0
     return jsonify(result)
 
 @app.route('/')
 def home():
     return jsonify({
         "name": "EasyApi",
-        "author": "@y3Huk_iphone",
-        "sources": ["Secret", "Secret", "Secret", "Seacret", "Secret", "Secret"]
+        "author": "@y3Huk_iphone"
     })
 
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)

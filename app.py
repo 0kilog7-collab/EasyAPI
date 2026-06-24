@@ -1,4 +1,5 @@
-from fastapi import FastAPI, Request, Query, Response
+from fastapi import FastAPI, Request, Query
+from fastapi.responses import JSONResponse
 import requests
 import re
 import os
@@ -40,13 +41,6 @@ REASON_URL = "https://graph.maybebot.icu/japi/v2/search"
 ALLOWED_KEYS = {}
 banned_ips = {}
 failed_attempts = {}
-
-def render_json(data, status_code=200):
-    return Response(
-        content=json.dumps(data, ensure_ascii=False, indent=2),
-        status_code=status_code,
-        media_type="application/json"
-    )
 
 def load_keys():
     global ALLOWED_KEYS
@@ -161,11 +155,7 @@ def sanitize_query(query):
         return query
     return re.sub(r'[^a-zA-Z0-9\s@\.\-_+:яёА-ЯЁ]', '', query)
 
-SUPPORTED_PARAMS = [
-    'pass', 'email', 'inn', 'text', 'фио', 'fio', 'phone', 
-    'vkid', 'vk', 'ip', 'snils', 'passport', 'ogrn', 'company',
-    'nick', 'telegram', 'vin'
-]
+SUPPORTED_PARAMS = ['pass', 'email', 'inn', 'text', 'фио', 'fio', 'phone', 'vkid', 'ip', 'snils', 'passport', 'ogrn', 'company', 'nick', 'vin']
 
 def detect_type(query):
     q = str(query).strip()
@@ -189,20 +179,18 @@ def detect_type(query):
         return "ogrn"
     if re.match(r'^[A-HJ-NPR-Z0-9]{17}$', q.upper()):
         return "vin"
-    if q.startswith('@'):
-        return "telegram"
     if re.match(r'^[А-ЯЁA-Z][а-яёa-zА-ЯЁA-Z0-9\s\-\.\,]+$', q) and len(q) > 3:
         return "company"
     return "text"
 
-# --- Workers ---
+# ====== ВОРКЕРЫ ======
 
 def reason_search(query, search_type):
     try:
         type_mapping = {
             "phone": "phone", "email": "email", "inn": "inn", "ip": "ip",
             "passport": "passport", "fio": "fio", "фио": "fio", "vk": "vk",
-            "vkid": "vk", "nick": "nick", "telegram": "telegram", "vin": "vin", "text": "fio"
+            "vkid": "vk", "nick": "nick", "vin": "vin"
         }
         api_type = type_mapping.get(search_type, "fio")
         headers = {"access_token": REASON_KEY, "Content-Type": "application/json"}
@@ -219,6 +207,7 @@ def snusbase(query, search_type):
         headers = {"Content-Type": "application/json"}
         snus_type = "password" if search_type == "pass" else "email"
         payload = {"terms": [str(query).strip()], "types": [snus_type], "wildcard": False}
+        
         for key in SNUSBASE_KEYS:
             try:
                 headers["Auth"] = key
@@ -241,11 +230,18 @@ def ofdata(query, search_type):
     status_code = 404
 
     type_map = {
-        "inn": ("person", "inn"), "phone": ("search", "phone"), "email": ("search", "email"),
-        "passport": ("person", "passport"), "snils": ("person", "snils"), "fio": ("search", "fio"),
-        "фио": ("search", "fio"), "ogrn": ("company", "ogrn"), "company": ("company", "query"),
+        "inn": ("person", "inn"),
+        "phone": ("search", "phone"),
+        "email": ("search", "email"),
+        "passport": ("person", "passport"),
+        "snils": ("person", "snils"),
+        "fio": ("search", "fio"),
+        "фио": ("search", "fio"),
+        "ogrn": ("company", "ogrn"),
+        "company": ("company", "query"),
         "text": ("search", "query")
     }
+
     endpoint, param = type_map.get(search_type, ("search", "query"))
     
     if search_type == "company":
@@ -268,7 +264,9 @@ def ofdata(query, search_type):
         parts = q.split()
         if len(parts) >= 2:
             params = {
-                "key": OFDATA_KEY, "first_name": parts[0], "last_name": parts[1],
+                "key": OFDATA_KEY,
+                "first_name": parts[0],
+                "last_name": parts[1],
                 "middle_name": parts[2] if len(parts) > 2 else ""
             }
             url = f"{OFDATA_BASE}/search"
@@ -291,7 +289,9 @@ def ofdata(query, search_type):
     except:
         status_code = 504
 
-    return {"source": "Ofdata", "data": collected_data} if collected_data else {"source": "Ofdata", "error": status_code}
+    if collected_data:
+        return {"source": "Ofdata", "data": collected_data}
+    return {"source": "Ofdata", "error": status_code}
 
 def infinity_check(query, search_type):
     try:
@@ -303,7 +303,8 @@ def infinity_check(query, search_type):
         
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "application/json, text/plain, */*", "Connection": "keep-alive"
+            "Accept": "application/json, text/plain, */*",
+            "Connection": "keep-alive"
         }
         
         q = str(query).strip()
@@ -324,10 +325,7 @@ def infinity_check(query, search_type):
             try:
                 res_data = r.json()
             except:
-                try:
-                    res_data = json.loads(r.text)
-                except:
-                    res_data = r.text
+                res_data = r.text
             return {"source": "InfinityCheck", "data": res_data}
         return {"source": "InfinityCheck", "error": r.status_code}
     except:
@@ -349,8 +347,10 @@ def lookup_vk(query):
     try:
         url = "https://api.vk.com/method/users.get"
         params = {
-            "user_ids": str(query).strip(), "access_token": VK_TOKEN,
-            "v": "5.199", "fields": "first_name,last_name,bdate,city,country,contacts,online"
+            "user_ids": str(query).strip(),
+            "access_token": VK_TOKEN,
+            "v": "5.199",
+            "fields": "first_name,last_name,bdate,city,country,contacts,online"
         }
         r = requests.get(url, params=params, timeout=8)
         if r.status_code == 200:
@@ -365,19 +365,19 @@ def lookup_shodan(query):
         url = f"{SHODAN_BASE_URL}/shodan/host/{ip}"
         params = {"key": SHODAN_KEY}
         r = requests.get(url, params=params, timeout=8)
+        
         if r.status_code == 403:
             fallback_url = f"https://internetdb.shodan.io/{ip}"
             r_fallback = requests.get(fallback_url, timeout=8)
             if r_fallback.status_code == 200:
                 return {"source": "Shodan (InternetDB Fallback)", "data": r_fallback.json()}
             return {"source": "Shodan", "error": r_fallback.status_code}
+                
         if r.status_code == 200:
             return {"source": "Shodan", "data": r.json()}
         return {"source": "Shodan", "error": r.status_code}
     except:
         return {"source": "Shodan", "error": 504}
-
-# --- Routes ---
 
 @app.api_route("/search", methods=["GET", "POST"])
 async def search(request: Request):
@@ -385,8 +385,8 @@ async def search(request: Request):
         if not check_auth(request):
             ip = get_real_ip(request)
             if is_ip_banned(ip):
-                return render_json({"error": "Your IP is banned for 30 days."}, 403)
-            return render_json({"error": "Unauthorized."}, 401)
+                return JSONResponse({"error": "Your IP is banned for 30 days."}, 403)
+            return JSONResponse({"error": "Unauthorized."}, 401)
 
         query = None
         search_type = None
@@ -414,28 +414,41 @@ async def search(request: Request):
                 query = request.query_params.get('query') or request.query_params.get('search')
         
         if not query:
-            return render_json({"error": "Missing search term"}, 400)
+            return JSONResponse({"error": "Missing search term"}, 400)
         
         query = sanitize_query(query)
+        
         if not search_type:
             search_type = detect_type(query)
         
-        result = {"query": query, "type": search_type, "found": False, "data": None}
+        result = {
+            "query": query,
+            "type": search_type,
+            "found": False,
+            "data": None
+        }
         
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = {}
-            if search_type in ["phone", "email", "inn", "ip", "passport", "fio", "фио", "vk", "vkid", "nick", "telegram", "vin", "text"]:
+            
+            if search_type in ["phone", "email", "inn", "ip", "passport", "fio", "фио", "vk", "vkid", "nick", "vin"]:
                 futures[executor.submit(reason_search, query, search_type)] = "reason"
+                
             if search_type in ["email", "pass"]:
                 futures[executor.submit(snusbase, query, search_type)] = "sn"
+                
             if search_type in ["inn", "text", "фио", "fio", "snils", "passport", "ogrn", "company"]:
                 futures[executor.submit(ofdata, query, search_type)] = "of"
+                
             if search_type in ["phone", "email", "text", "фио", "fio", "company"]:
                 futures[executor.submit(infinity_check, query, search_type)] = "inf"
+
             if search_type == "phone":
                 futures[executor.submit(lookup_phone_via_seon, query)] = "seon"
+
             if search_type in ["vkid", "vk"]:
                 futures[executor.submit(lookup_vk, query)] = "vk"
+
             if search_type == "ip":
                 futures[executor.submit(lookup_shodan, query)] = "shodan"
                 
@@ -443,21 +456,18 @@ async def search(request: Request):
             for future in as_completed(futures):
                 res = future.result()
                 if res and "data" in res:
-                    raw_data = res["data"]
-                    if isinstance(raw_data, str):
-                        try:
-                            raw_data = json.loads(raw_data)
-                        except:
-                            pass
-                    all_data.append(raw_data)
+                    all_data.append(res["data"])
             
             if all_data:
                 result["found"] = True
                 result["data"] = all_data
+            else:
+                result["found"] = False
+                result["data"] = None
         
-        return render_json(result)
+        return JSONResponse(result)
     except Exception as e:
-        return render_json({"error": "Internal server error", "details": str(e)}, 500)
+        return JSONResponse({"error": "Internal server error", "details": str(e)}, 500)
 
 @app.api_route("/key/create", methods=["POST", "GET"])
 async def create_key(request: Request):
@@ -472,7 +482,7 @@ async def create_key(request: Request):
                 master = data.get("master_key")
         
         if master != MASTER_KEY:
-            return render_json({"error": "Unauthorized."}, 401)
+            return JSONResponse({"error": "Unauthorized."}, 401)
         
         new_key = request.query_params.get("new_key")
         duration_param = request.query_params.get("duration")
@@ -487,6 +497,7 @@ async def create_key(request: Request):
                 duration_param = data.get("duration")
         
         global ALLOWED_KEYS
+
         if not new_key:
             while True:
                 new_key = generate_random_key(24)
@@ -494,7 +505,7 @@ async def create_key(request: Request):
                     break
         else:
             if new_key in ALLOWED_KEYS:
-                return render_json({"error": "Already exists."}, 400)
+                return JSONResponse({"error": "Already exists."}, 400)
         
         expires_at_str = None
         if duration_param:
@@ -503,7 +514,7 @@ async def create_key(request: Request):
                 expire_datetime = datetime.now() + time_delta
                 expires_at_str = expire_datetime.strftime("%Y-%m-%d %H:%M:%S")
             else:
-                return render_json({"error": "Invalid duration format."}, 400)
+                return JSONResponse({"error": "Invalid duration format."}, 400)
         
         ALLOWED_KEYS[new_key] = {"expires_at": expires_at_str}
         save_keys_to_file()
@@ -511,9 +522,13 @@ async def create_key(request: Request):
         log_msg = f"[CREATE LOG] [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Ключ: '{new_key}' | Истекает: {expires_at_str if expires_at_str else 'Permanent'}"
         write_to_log(log_msg)
         
-        return render_json({"success": True, "key": new_key, "expires_at": expires_at_str if expires_at_str else "Permanent"})
+        return JSONResponse({
+            "success": True,
+            "key": new_key,
+            "expires_at": expires_at_str if expires_at_str else "Permanent"
+        })
     except Exception as e:
-        return render_json({"error": str(e)}, 500)
+        return JSONResponse({"error": str(e)}, 500)
 
 @app.api_route("/key/delete", methods=["POST", "GET"])
 async def delete_key(request: Request):
@@ -528,7 +543,7 @@ async def delete_key(request: Request):
                 master = data.get("master_key")
         
         if master != MASTER_KEY:
-            return render_json({"error": "Unauthorized."}, 401)
+            return JSONResponse({"error": "Unauthorized."}, 401)
         
         target_key = request.query_params.get("target_key")
         if request.method == "POST":
@@ -540,11 +555,11 @@ async def delete_key(request: Request):
                 target_key = data.get("target_key")
         
         if not target_key:
-            return render_json({"error": "Missing parameter."}, 400)
+            return JSONResponse({"error": "Missing parameter."}, 400)
         
         global ALLOWED_KEYS
         if target_key not in ALLOWED_KEYS:
-            return render_json({"error": "Not found."}, 404)
+            return JSONResponse({"error": "Not found."}, 404)
         
         del ALLOWED_KEYS[target_key]
         save_keys_to_file()
@@ -552,23 +567,26 @@ async def delete_key(request: Request):
         log_msg = f"[DELETE LOG] [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Удален ключ: '{target_key}'"
         write_to_log(log_msg)
         
-        return render_json({"success": True, "message": "Removed."})
+        return JSONResponse({"success": True, "message": "Removed."})
     except Exception as e:
-        return render_json({"error": str(e)}, 500)
+        return JSONResponse({"error": str(e)}, 500)
 
 @app.get("/key/list")
 async def list_keys(request: Request):
     try:
         master = request.headers.get("X-Master-Key") or request.query_params.get("master_key")
         if master != MASTER_KEY:
-            return render_json({"error": "Unauthorized."}, 401)
-        return render_json({"allowed_api_keys": ALLOWED_KEYS})
+            return JSONResponse({"error": "Unauthorized."}, 401)
+        return JSONResponse({"allowed_api_keys": ALLOWED_KEYS})
     except Exception as e:
-        return render_json({"error": str(e)}, 500)
+        return JSONResponse({"error": str(e)}, 500)
 
 @app.get("/")
 async def home():
-    return render_json({"name": "EasyApi", "author": "@y3Huk_iphone"})
+    return JSONResponse({
+        "name": "EasyApi",
+        "author": "@y3Huk_iphone"
+    })
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))

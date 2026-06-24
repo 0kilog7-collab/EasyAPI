@@ -368,7 +368,7 @@ async def list_keys(request: Request):
 
 @app.route('/', methods=['GET'])
 async def home():
-    return {"name": "EasyApi", "author": "@y3Huk_iphone", "Хочу кушать! Сделай поиск"}
+    return {"name": "EasyApi", "author": "@y3Huk_iphone"}
 
 def generate_random_key(length=24):
     alphabet = string.ascii_letters + string.digits

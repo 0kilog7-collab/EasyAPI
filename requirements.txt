@@ -1,4 +1,6 @@
-flask
-flask_limiter
+fastapi
+uvicorn
+httpx
+python-multipart
+pydantic
 requests
-gunicorn

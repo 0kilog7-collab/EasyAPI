@@ -29,14 +29,15 @@ INFINITY_KEY = "N7xQ4Lp2ZWk8F5VcD1mR9H6TyU3E0BJa"
 SEON_KEY = "758f5f54-befb-4125-bd17-931689af6633"
 VK_TOKEN = "0af157510af157510af15751aa0a89e69600af10af157516a0bc15996e74fe2b440998c"
 SHODAN_KEY = "xx6gSg9pWYmJcND1hEMbcWuOJtjbHSZ5"
-REASON_KEY = "jupit-54cb687d48b31e8234d6ab7f4f"
+MAYBE_API_KEY = "jupit-54cb687d48b31e8234d6ab7f4f"
 
 SNUSBASE_URL = "https://api.snusbase.com/data/search"
 OFDATA_BASE = "https://api.ofdata.ru/v2"
 INFINITY_URL = "https://infinity-search.fun/find.php"
 SEON_URL = "https://api.seon.io/SeonRestService/phone-api/v2"
 SHODAN_BASE_URL = "https://api.shodan.io"
-REASON_URL = "https://graph.maybebot.icu/japi/v2/search"
+MAYBE_V1_URL = "https://graph.maybebot.icu/japi/v1/search"
+MAYBE_V2_URL = "https://graph.maybebot.icu/japi/v2/search"
 
 ALLOWED_KEYS = {}
 banned_ips = {}
@@ -155,7 +156,7 @@ def sanitize_query(query):
         return query
     return re.sub(r'[^a-zA-Z0-9\s@\.\-_+:яёА-ЯЁ]', '', query)
 
-SUPPORTED_PARAMS = ['pass', 'email', 'inn', 'text', 'фио', 'fio', 'phone', 'vkid', 'ip', 'snils', 'passport', 'ogrn', 'company', 'nick', 'vin']
+SUPPORTED_PARAMS = ['pass', 'email', 'inn', 'text', 'фио', 'fio', 'phone', 'vkid', 'ip', 'snils', 'passport', 'ogrn', 'company', 'vin']
 
 def detect_type(query):
     q = str(query).strip()
@@ -177,30 +178,11 @@ def detect_type(query):
         return "snils"
     if re.match(r'^\d{13}$', q):
         return "ogrn"
-    if re.match(r'^[A-HJ-NPR-Z0-9]{17}$', q.upper()):
-        return "vin"
     if re.match(r'^[А-ЯЁA-Z][а-яёa-zА-ЯЁA-Z0-9\s\-\.\,]+$', q) and len(q) > 3:
         return "company"
+    if re.match(r'^[A-HJ-NPR-Z0-9]{17}$', q.upper()):
+        return "vin"
     return "text"
-
-# ====== ВОРКЕРЫ ======
-
-def reason_search(query, search_type):
-    try:
-        type_mapping = {
-            "phone": "phone", "email": "email", "inn": "inn", "ip": "ip",
-            "passport": "passport", "fio": "fio", "фио": "fio", "vk": "vk",
-            "vkid": "vk", "nick": "nick", "vin": "vin"
-        }
-        api_type = type_mapping.get(search_type, "fio")
-        headers = {"access_token": REASON_KEY, "Content-Type": "application/json"}
-        payload = {"search_type": api_type, "query": str(query).strip()}
-        r = requests.post(REASON_URL, headers=headers, json=payload, timeout=10)
-        if r.status_code == 200:
-            return {"source": "ReasonAPI", "data": r.json()}
-        return {"source": "ReasonAPI", "error": r.status_code}
-    except:
-        return {"source": "ReasonAPI", "error": 504}
 
 def snusbase(query, search_type):
     try:
@@ -379,6 +361,36 @@ def lookup_shodan(query):
     except:
         return {"source": "Shodan", "error": 504}
 
+def lookup_maybebot(query, search_type):
+    try:
+        q = str(query).strip()
+        headers = {
+            "access_token": MAYBE_API_KEY,
+            "Content-Type": "application/json"
+        }
+        
+        if search_type == "vin":
+            url = MAYBE_V1_URL
+            payload = {"search_type": "vin", "query": q}
+        elif search_type == "passport":
+            url = MAYBE_V1_URL
+            payload = {"search_type": "passport", "query": q}
+        elif search_type == "fio":
+            url = MAYBE_V1_URL
+            payload = {"search_type": "fio", "query": q}
+        elif search_type == "phone":
+            url = MAYBE_V2_URL
+            payload = {"search_type": "phone", "query": q}
+        else:
+            return None
+        
+        r = requests.post(url, headers=headers, json=payload, timeout=10)
+        if r.status_code == 200:
+            return {"source": "Maybebot", "data": r.json()}
+        return {"source": "Maybebot", "error": r.status_code}
+    except:
+        return {"source": "Maybebot", "error": 504}
+
 @app.api_route("/search", methods=["GET", "POST"])
 async def search(request: Request):
     try:
@@ -428,12 +440,9 @@ async def search(request: Request):
             "data": None
         }
         
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        with ThreadPoolExecutor(max_workers=2) as executor:
             futures = {}
             
-            if search_type in ["phone", "email", "inn", "ip", "passport", "fio", "фио", "vk", "vkid", "nick", "vin"]:
-                futures[executor.submit(reason_search, query, search_type)] = "reason"
-                
             if search_type in ["email", "pass"]:
                 futures[executor.submit(snusbase, query, search_type)] = "sn"
                 
@@ -446,11 +455,14 @@ async def search(request: Request):
             if search_type == "phone":
                 futures[executor.submit(lookup_phone_via_seon, query)] = "seon"
 
-            if search_type in ["vkid", "vk"]:
+            if search_type == "vkid":
                 futures[executor.submit(lookup_vk, query)] = "vk"
 
             if search_type == "ip":
                 futures[executor.submit(lookup_shodan, query)] = "shodan"
+
+            if search_type in ["vin", "passport", "fio", "phone"]:
+                futures[executor.submit(lookup_maybebot, query, search_type)] = "maybe"
                 
             all_data = []
             for future in as_completed(futures):

@@ -11,6 +11,9 @@ from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+import time
+import threading
+import sys
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = None
@@ -21,16 +24,6 @@ try:
     app.json.compact = False
 except AttributeError:
     pass
-
-@app.after_request
-def add_security_headers(response):
-    response.headers['X-Frame-Options'] = 'DENY'
-    response.headers['X-Content-Type-Options'] = 'nosniff'
-    response.headers['X-XSS-Protection'] = '1; mode=block'
-    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
-    response.headers['Permissions-Policy'] = 'geolocation=(), microphone=(), camera=()'
-    response.headers['Content-Security-Policy'] = "default-src 'none'; script-src 'self'; connect-src 'self' https://api.*; img-src 'self' data:; style-src 'self' 'unsafe-inline'"
-    return response
 
 def get_real_ip():
     forwarded = request.headers.get('X-Forwarded-For')
@@ -63,6 +56,27 @@ def ratelimit_handler(e):
     ip = get_real_ip()
     ban_ip(ip, 30)
     return jsonify({"error": "Too many requests. You are banned for 30 days."}), 429
+
+@app.errorhandler(Exception)
+def handle_all_exceptions(e):
+    print(f"CRASH: {e}")
+    return jsonify({"error": "Internal server error"}), 500
+
+@app.before_request
+def block_banned():
+    ip = get_real_ip()
+    if is_ip_banned(ip):
+        return jsonify({"error": "Banned for 30 days"}), 403
+
+@app.after_request
+def add_security_headers(response):
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    response.headers['Permissions-Policy'] = 'geolocation=(), microphone=(), camera=()'
+    response.headers['Content-Security-Policy'] = "default-src 'none'; script-src 'self'; connect-src 'self' https://api.*; img-src 'self' data:; style-src 'self' 'unsafe-inline'"
+    return response
 
 def sanitize_query(query):
     if not query:
@@ -111,10 +125,8 @@ def parse_duration(duration_str):
     match = re.match(r'^(\d+)\s*(day|days|hour|hours|min|mins|minute|minutes)$', str(duration_str).strip().lower())
     if not match:
         return None
-    
     amount = int(match.group(1))
     unit = match.group(2)
-    
     if 'day' in unit:
         return timedelta(days=amount)
     elif 'hour' in unit:
@@ -155,24 +167,18 @@ def save_keys_to_file():
 
 def check_auth():
     ip = get_real_ip()
-    
     if is_ip_banned(ip):
         return False
-    
     auth_key = request.headers.get("X-API-Key") or request.args.get("api_key")
-    
     if ip in failed_attempts and failed_attempts[ip] >= 15:
         ban_ip(ip, 30)
         return False
-    
     if not auth_key:
         failed_attempts[ip] = failed_attempts.get(ip, 0) + 1
         return False
-    
     if auth_key == MASTER_KEY:
         failed_attempts[ip] = 0
         return True
-        
     if auth_key in ALLOWED_KEYS:
         expires_at_str = ALLOWED_KEYS[auth_key].get("expires_at")
         if expires_at_str:
@@ -183,7 +189,6 @@ def check_auth():
                 return False
         failed_attempts[ip] = 0
         return True
-    
     failed_attempts[ip] = failed_attempts.get(ip, 0) + 1
     return False
 
@@ -192,7 +197,6 @@ SUPPORTED_PARAMS = ['pass', 'email', 'inn', 'text', 'фио', 'fio', 'phone', 'v
 def detect_type(query):
     q = str(query).strip()
     q_lower = q.lower()
-    
     if q_lower.startswith('pass:'):
         return "pass"
     if q_lower.startswith('inn') or (re.match(r'^\d{10}$|^\d{12}$', re.sub(r'[^\d]', '', q)) and len(re.sub(r'[^\d]', '', q)) in [10, 12]):
@@ -211,39 +215,23 @@ def detect_type(query):
         return "ogrn"
     if re.match(r'^[А-ЯЁA-Z][а-яёa-zА-ЯЁA-Z0-9\s\-\.\,]+$', q) and len(q) > 3:
         return "company"
-    
     return "text"
 
 def snusbase(query, search_type):
     q = str(query).strip()
     snus_type = "password" if search_type == "pass" else "email"
-    payload = {
-        "terms": [q],
-        "types": [snus_type],
-        "wildcard": False
-    }
-    
+    payload = {"terms": [q], "types": [snus_type], "wildcard": False}
     for idx, key in enumerate(SNUSBASE_KEYS):
         try:
             headers = {"Content-Type": "application/json", "Auth": key}
-            r = requests.post(
-                SNUSBASE_URL,
-                headers=headers,
-                json=payload,
-                timeout=8
-            )
-            
+            r = requests.post(SNUSBASE_URL, headers=headers, json=payload, timeout=8)
             if r.status_code == 200:
                 return {"source": "Snusbase", "data": r.json()}
-            
             if r.status_code in [402, 429]:
                 continue
-            
             return {"source": "Snusbase", "error": r.status_code}
-            
         except:
             continue
-    
     return {"source": "Snusbase", "error": "All keys exhausted"}
 
 def ofdata(query, search_type):
@@ -251,7 +239,6 @@ def ofdata(query, search_type):
     headers = {"User-Agent": "Mozilla/5.0"}
     collected_data = {}
     status_code = 404
-
     type_map = {
         "inn": ("person", "inn"),
         "phone": ("search", "phone"),
@@ -264,9 +251,7 @@ def ofdata(query, search_type):
         "company": ("company", "query"),
         "text": ("search", "query")
     }
-
     endpoint, param = type_map.get(search_type, ("search", "query"))
-    
     if search_type == "company":
         if re.match(r'^\d{10}$|^\d{12}$', q):
             url = f"{OFDATA_BASE}/company?key={OFDATA_KEY}&inn={q}"
@@ -282,7 +267,6 @@ def ofdata(query, search_type):
         except:
             status_code = 504
         return {"source": "Ofdata", "data": collected_data} if collected_data else {"source": "Ofdata", "error": status_code}
-
     if search_type in ["fio", "фио"]:
         parts = q.split()
         if len(parts) >= 2:
@@ -301,10 +285,8 @@ def ofdata(query, search_type):
             except:
                 status_code = 504
             return {"source": "Ofdata", "data": collected_data} if collected_data else {"source": "Ofdata", "error": status_code}
-
     params = {"key": OFDATA_KEY, param: q}
     url = f"{OFDATA_BASE}/{endpoint}"
-    
     try:
         r = requests.get(url, headers=headers, params=params, timeout=8)
         status_code = r.status_code
@@ -312,7 +294,6 @@ def ofdata(query, search_type):
             collected_data["result"] = r.json()
     except:
         status_code = 504
-
     if collected_data:
         return {"source": "Ofdata", "data": collected_data}
     return {"source": "Ofdata", "error": status_code}
@@ -322,13 +303,11 @@ def infinity_check(query, search_type):
         session = requests.Session()
         retries = Retry(total=2, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
         session.mount('https://', HTTPAdapter(max_retries=retries))
-        
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Accept": "application/json, text/plain, */*",
             "Connection": "keep-alive"
         }
-        
         q = str(query).strip()
         param_name = None
         if search_type == "phone":
@@ -337,10 +316,8 @@ def infinity_check(query, search_type):
             param_name = "email"
         elif search_type in ["text", "фио", "fio", "company"]:
             param_name = "fio"
-            
         if not param_name:
             return None
-
         params = {param_name: q, "token": INFINITY_KEY}
         r = session.get(INFINITY_URL, headers=headers, params=params, timeout=(3, 8))
         if r.status_code == 200:
@@ -356,13 +333,8 @@ def infinity_check(query, search_type):
 def lookup_phone_via_seon(query):
     try:
         clean_phone = re.sub(r'[^\d]', '', str(query).strip())
-        headers = {
-            "X-API-KEY": SEON_KEY,
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "phone": clean_phone
-        }
+        headers = {"X-API-KEY": SEON_KEY, "Content-Type": "application/json"}
+        payload = {"phone": clean_phone}
         r = requests.post(SEON_URL, headers=headers, json=payload, timeout=8)
         if r.status_code == 200:
             return {"source": "SEON", "data": r.json()}
@@ -392,14 +364,12 @@ def lookup_shodan(query):
         url = f"{SHODAN_BASE_URL}/shodan/host/{ip}"
         params = {"key": SHODAN_KEY}
         r = requests.get(url, params=params, timeout=8)
-        
         if r.status_code == 403:
             fallback_url = f"https://internetdb.shodan.io/{ip}"
             r_fallback = requests.get(fallback_url, timeout=8)
             if r_fallback.status_code == 200:
                 return {"source": "Shodan (InternetDB Fallback)", "data": r_fallback.json()}
             return {"source": "Shodan", "error": r_fallback.status_code}
-                
         if r.status_code == 200:
             return {"source": "Shodan", "data": r.json()}
         return {"source": "Shodan", "error": r.status_code}
@@ -409,171 +379,161 @@ def lookup_shodan(query):
 @app.route('/key/create', methods=['POST', 'GET'])
 @limiter.limit("5 per minute")
 def create_key():
-    master = request.headers.get("X-Master-Key") or request.args.get("master_key")
-    if not master and request.is_json:
-        master = request.get_json(silent=True).get("master_key")
-        
-    if master != MASTER_KEY:
-        return jsonify({"error": "Unauthorized."}), 401
-        
-    new_key = request.args.get("new_key")
-    duration_param = request.args.get("duration")
-    
-    if not new_key and request.is_json:
-        json_data = request.get_json(silent=True) or {}
-        new_key = json_data.get("new_key")
-        duration_param = json_data.get("duration")
-        
-    global ALLOWED_KEYS
-
-    if not new_key:
-        while True:
-            new_key = generate_random_key(24)
-            if new_key not in ALLOWED_KEYS:
-                break
-    else:
-        if new_key in ALLOWED_KEYS:
-            return jsonify({"error": "Already exists."}), 400
-        
-    expires_at_str = None
-    if duration_param:
-        time_delta = parse_duration(duration_param)
-        if time_delta:
-            expire_datetime = datetime.now() + time_delta
-            expires_at_str = expire_datetime.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        master = request.headers.get("X-Master-Key") or request.args.get("master_key")
+        if not master and request.is_json:
+            master = request.get_json(silent=True).get("master_key")
+        if master != MASTER_KEY:
+            return jsonify({"error": "Unauthorized."}), 401
+        new_key = request.args.get("new_key")
+        duration_param = request.args.get("duration")
+        if not new_key and request.is_json:
+            json_data = request.get_json(silent=True) or {}
+            new_key = json_data.get("new_key")
+            duration_param = json_data.get("duration")
+        global ALLOWED_KEYS
+        if not new_key:
+            while True:
+                new_key = generate_random_key(24)
+                if new_key not in ALLOWED_KEYS:
+                    break
         else:
-            return jsonify({"error": "Invalid duration format."}), 400
-            
-    ALLOWED_KEYS[new_key] = {"expires_at": expires_at_str}
-    save_keys_to_file()
-    
-    log_msg = f"[CREATE LOG] [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Ключ: '{new_key}' | Истекает: {expires_at_str if expires_at_str else 'Permanent'}"
-    write_to_log(log_msg)
-    
-    return jsonify({
-        "success": True, 
-        "key": new_key,
-        "expires_at": expires_at_str if expires_at_str else "Permanent"
-    })
+            if new_key in ALLOWED_KEYS:
+                return jsonify({"error": "Already exists."}), 400
+        expires_at_str = None
+        if duration_param:
+            time_delta = parse_duration(duration_param)
+            if time_delta:
+                expire_datetime = datetime.now() + time_delta
+                expires_at_str = expire_datetime.strftime("%Y-%m-%d %H:%M:%S")
+            else:
+                return jsonify({"error": "Invalid duration format."}), 400
+        ALLOWED_KEYS[new_key] = {"expires_at": expires_at_str}
+        save_keys_to_file()
+        log_msg = f"[CREATE LOG] [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Ключ: '{new_key}' | Истекает: {expires_at_str if expires_at_str else 'Permanent'}"
+        write_to_log(log_msg)
+        return jsonify({
+            "success": True,
+            "key": new_key,
+            "expires_at": expires_at_str if expires_at_str else "Permanent"
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/key/delete', methods=['POST', 'GET'])
 @limiter.limit("5 per minute")
 def delete_key():
-    master = request.headers.get("X-Master-Key") or request.args.get("master_key")
-    if not master and request.is_json:
-        master = request.get_json(silent=True).get("master_key")
-        
-    if master != MASTER_KEY:
-        return jsonify({"error": "Unauthorized."}), 401
-        
-    target_key = request.args.get("target_key")
-    if not target_key and request.is_json:
-        target_key = request.get_json(silent=True).get("target_key")
-        
-    if not target_key:
-        return jsonify({"error": "Missing parameter."}), 400
-        
-    global ALLOWED_KEYS
-    if target_key not in ALLOWED_KEYS:
-        return jsonify({"error": "Not found."}), 404
-        
-    del ALLOWED_KEYS[target_key]
-    save_keys_to_file()
-    
-    log_msg = f"[DELETE LOG] [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Удален ключ: '{target_key}'"
-    write_to_log(log_msg)
-    
-    return jsonify({"success": True, "message": "Removed."})
+    try:
+        master = request.headers.get("X-Master-Key") or request.args.get("master_key")
+        if not master and request.is_json:
+            master = request.get_json(silent=True).get("master_key")
+        if master != MASTER_KEY:
+            return jsonify({"error": "Unauthorized."}), 401
+        target_key = request.args.get("target_key")
+        if not target_key and request.is_json:
+            target_key = request.get_json(silent=True).get("target_key")
+        if not target_key:
+            return jsonify({"error": "Missing parameter."}), 400
+        global ALLOWED_KEYS
+        if target_key not in ALLOWED_KEYS:
+            return jsonify({"error": "Not found."}), 404
+        del ALLOWED_KEYS[target_key]
+        save_keys_to_file()
+        log_msg = f"[DELETE LOG] [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Удален ключ: '{target_key}'"
+        write_to_log(log_msg)
+        return jsonify({"success": True, "message": "Removed."})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/key/list', methods=['GET'])
 @limiter.limit("5 per minute")
 def list_keys():
-    master = request.headers.get("X-Master-Key") or request.args.get("master_key")
-    if master != MASTER_KEY:
-        return jsonify({"error": "Unauthorized."}), 401
-    return jsonify({"allowed_api_keys": ALLOWED_KEYS})
+    try:
+        master = request.headers.get("X-Master-Key") or request.args.get("master_key")
+        if master != MASTER_KEY:
+            return jsonify({"error": "Unauthorized."}), 401
+        return jsonify({"allowed_api_keys": ALLOWED_KEYS})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/search', methods=['POST', 'GET'])
 @limiter.limit("10 per minute")
 def search():
-    if not check_auth():
-        ip = get_real_ip()
-        if is_ip_banned(ip):
-            return jsonify({"error": "Your IP is banned for 30 days."}), 403
-        return jsonify({"error": "Unauthorized."}), 401
+    try:
+        if not check_auth():
+            ip = get_real_ip()
+            if is_ip_banned(ip):
+                return jsonify({"error": "Your IP is banned for 30 days."}), 403
+            return jsonify({"error": "Unauthorized."}), 401
 
-    query = None
-    search_type = None
+        query = None
+        search_type = None
 
-    if request.method == 'POST':
-        data = request.get_json(silent=True) or {}
-        for param in SUPPORTED_PARAMS:
-            if param in data:
-                query = data[param]
-                search_type = param
-                break
-        if not query:
-            query = data.get('query') or data.get('search')
-    else:
-        for param in SUPPORTED_PARAMS:
-            val = request.args.get(param)
-            if val:
-                query = val
-                search_type = param
-                break
-        if not query:
-            query = request.args.get('query') or request.args.get('search')
-    
-    if not query:
-        return jsonify({"error": "Missing search term"}), 400
-    
-    query = sanitize_query(query)
-    
-    if not search_type:
-        search_type = detect_type(query)
-    
-    result = {
-        "query": query,
-        "type": search_type,
-        "found": False,
-        "data": None
-    }
-    
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {}
-        
-        if search_type in ["email", "pass"]:
-            futures[executor.submit(snusbase, query, search_type)] = "sn"
-            
-        if search_type in ["inn", "text", "фио", "fio", "snils", "passport", "ogrn", "company"]:
-            futures[executor.submit(ofdata, query, search_type)] = "of"
-            
-        if search_type in ["phone", "email", "text", "фио", "fio", "company"]:
-            futures[executor.submit(infinity_check, query, search_type)] = "inf"
-
-        if search_type == "phone":
-            futures[executor.submit(lookup_phone_via_seon, query)] = "seon"
-
-        if search_type == "vkid":
-            futures[executor.submit(lookup_vk, query)] = "vk"
-
-        if search_type == "ip":
-            futures[executor.submit(lookup_shodan, query)] = "shodan"
-            
-        all_data = []
-        for future in as_completed(futures):
-            res = future.result()
-            if res and "data" in res:
-                all_data.append(res["data"])
-        
-        if all_data:
-            result["found"] = True
-            result["data"] = all_data
+        if request.method == 'POST':
+            data = request.get_json(silent=True) or {}
+            for param in SUPPORTED_PARAMS:
+                if param in data:
+                    query = data[param]
+                    search_type = param
+                    break
+            if not query:
+                query = data.get('query') or data.get('search')
         else:
-            result["found"] = False
-            result["data"] = None
-    
-    return jsonify(result)
+            for param in SUPPORTED_PARAMS:
+                val = request.args.get(param)
+                if val:
+                    query = val
+                    search_type = param
+                    break
+            if not query:
+                query = request.args.get('query') or request.args.get('search')
+
+        if not query:
+            return jsonify({"error": "Missing search term"}), 400
+
+        query = sanitize_query(query)
+
+        if not search_type:
+            search_type = detect_type(query)
+
+        result = {
+            "query": query,
+            "type": search_type,
+            "found": False,
+            "data": None
+        }
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = {}
+            if search_type in ["email", "pass"]:
+                futures[executor.submit(snusbase, query, search_type)] = "sn"
+            if search_type in ["inn", "text", "фио", "fio", "snils", "passport", "ogrn", "company"]:
+                futures[executor.submit(ofdata, query, search_type)] = "of"
+            if search_type in ["phone", "email", "text", "фио", "fio", "company"]:
+                futures[executor.submit(infinity_check, query, search_type)] = "inf"
+            if search_type == "phone":
+                futures[executor.submit(lookup_phone_via_seon, query)] = "seon"
+            if search_type == "vkid":
+                futures[executor.submit(lookup_vk, query)] = "vk"
+            if search_type == "ip":
+                futures[executor.submit(lookup_shodan, query)] = "shodan"
+
+            all_data = []
+            for future in as_completed(futures):
+                res = future.result()
+                if res and "data" in res:
+                    all_data.append(res["data"])
+
+            if all_data:
+                result["found"] = True
+                result["data"] = all_data
+            else:
+                result["found"] = False
+                result["data"] = None
+
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
 @app.route('/')
 def home():
@@ -582,6 +542,15 @@ def home():
         "author": "@y3Huk_iphone"
     })
 
+def self_ping():
+    while True:
+        try:
+            requests.get("https://твой-сервер.onrender.com/", timeout=5)
+        except:
+            pass
+        time.sleep(300)
+
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    threading.Thread(target=self_ping, daemon=True).start()
+    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)

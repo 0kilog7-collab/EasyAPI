@@ -19,7 +19,6 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 KEYS_FILE = os.path.join(BASE_DIR, "api_keys.json")
 LOG_FILE = os.path.join(BASE_DIR, "keys_log.txt")
 
-# API Keys Configuration
 SNUSBASE_KEYS = [
     "sb5029dec66mht55m78fx8bsw6tm8a",
     "sbmeovhou6ecsn9fd9wcwnwwvsvwnc"
@@ -31,7 +30,6 @@ VK_TOKEN = "0af157510af157510af15751aa0a89e69600af10af157516a0bc15996e74fe2b4409
 SHODAN_KEY = "xx6gSg9pWYmJcND1hEMbcWuOJtjbHSZ5"
 REASON_KEY = "jupit-54cb687d48b31e8234d6ab7f4f"
 
-# Endpoints
 SNUSBASE_URL = "https://api.snusbase.com/data/search"
 OFDATA_BASE = "https://api.ofdata.ru/v2"
 INFINITY_URL = "https://infinity-search.fun/find.php"
@@ -44,7 +42,6 @@ banned_ips = {}
 failed_attempts = {}
 
 def render_json(data, status_code=200):
-    """Выводит чистый, неэкранированный UTF-8 JSON без маршалинга"""
     return Response(
         content=json.dumps(data, ensure_ascii=False, indent=2),
         status_code=status_code,
@@ -464,62 +461,6 @@ async def search(request: Request):
 
 @app.api_route("/key/create", methods=["POST", "GET"])
 async def create_key(request: Request):
-    try:
-        master = request.headers.get("X-Master-Key") or request.query_params.get("master_key")
-        if request.method == "POST":
-            try:
-                data = await request.json()
-            except:
-                data = {}
-            if not master:
-                master = data.get("master_key")
-        
-        if master != MASTER_KEY:
-            return render_json({"error": "Unauthorized."}, 401)
-        
-        new_key = request.query_params.get("new_key")
-        duration_param = request.query_params.get("duration")
-        if request.method == "POST":
-            try:
-                data = await request.json()
-            except:
-                data = {}
-            if not new_key:
-                new_key = data.get("new_key")
-            if not duration_param:
-                duration_param = data.get("duration")
-        
-        global ALLOWED_KEYS
-        if not new_key:
-            while True:
-                new_key = generate_random_key(24)
-                if new_key not in ALLOWED_KEYS:
-                    break
-        else:
-            if new_key in ALLOWED_KEYS:
-                return render_json({"error": "Already exists."}, 400)
-        
-        expires_at_str = None
-        if duration_param:
-            time_delta = parse_duration(duration_param)
-            if time_delta:
-                expire_datetime = datetime.now() + time_delta
-                expires_at_str = expire_datetime.strftime("%Y-%m-%d %H:%M:%S")
-            else:
-                return render_json({"error": "Invalid duration format."}, 400)
-        
-        ALLOWED_KEYS[new_key] = {"expires_at": expires_at_str}
-        save_keys_to_file()
-        
-        log_msg = f"[CREATE LOG] [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Ключ: '{new_key}' | Истекает: {expires_at_str if expires_at_str else 'Permanent'}"
-        write_to_log(log_msg)
-        
-        return render_json({"success": True, "key": new_key, "expires_at": expires_at_str if expires_at_str else "Permanent"})
-    except Exception as e:
-        return render_json({"error": str(e)}, 500)
-
-@app.api_route("/key/delete", methods=["POST", "GET"])
-async def delete_key(request: Request):
     try:
         master = request.headers.get("X-Master-Key") or request.query_params.get("master_key")
         if request.method == "POST":

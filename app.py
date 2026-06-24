@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.security import APIKeyHeader
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import requests
@@ -12,11 +12,8 @@ from datetime import datetime, timedelta
 import asyncio
 import httpx
 import uvicorn
-from contextlib import asynccontextmanager
 
 app = FastAPI()
-
-API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 MASTER_KEY = "hsjdjfhrnjdjd72jrhfbsbxjdndn772hdjd92hrjdjx72nrkfusk8qkrklmrwoco52jrmfn95eufjr"
 
@@ -63,6 +60,40 @@ def save_keys():
     with open(KEYS_FILE, 'w') as f:
         json.dump(ALLOWED_KEYS, f)
 
+def write_to_log(message):
+    print(message)
+    try:
+        with open(LOG_FILE, 'a', encoding='utf-8') as f:
+            f.write(f"{message}\n")
+    except:
+        pass
+
+def generate_random_key(length=24):
+    alphabet = string.ascii_letters + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
+
+def parse_duration(duration_str):
+    if not duration_str:
+        return None
+    match = re.match(r'^(\d+)\s*(day|days|hour|hours|min|mins|minute|minutes)$', str(duration_str).strip().lower())
+    if not match:
+        return None
+    amount = int(match.group(1))
+    unit = match.group(2)
+    if 'day' in unit:
+        return timedelta(days=amount)
+    elif 'hour' in unit:
+        return timedelta(hours=amount)
+    elif 'min' in unit:
+        return timedelta(minutes=amount)
+    return None
+
+async def get_ip(request: Request):
+    forwarded = request.headers.get('X-Forwarded-For')
+    if forwarded:
+        return forwarded.split(',')[0].strip()
+    return request.client.host if request.client else "127.0.0.1"
+
 async def is_banned(ip: str) -> bool:
     if ip in banned_ips:
         if datetime.now() < banned_ips[ip]:
@@ -100,9 +131,8 @@ async def check_auth(api_key: str, ip: str) -> bool:
     return False
 
 def detect_type(query: str) -> str:
-    q = query.strip()
+    q = str(query).strip()
     q_lower = q.lower()
-    
     if q_lower.startswith('pass:'):
         return "pass"
     if q_lower.startswith('inn') or (re.match(r'^\d{10}$|^\d{12}$', re.sub(r'[^\d]', '', q)) and len(re.sub(r'[^\d]', '', q)) in [10, 12]):
@@ -123,16 +153,21 @@ def detect_type(query: str) -> str:
         return "company"
     return "text"
 
-async def snusbase(query: str):
+def sanitize_query(query):
+    if not query:
+        return query
+    return re.sub(r'[^a-zA-Z0-9\s@\.\-_+:яёА-ЯЁ]', '', query)
+
+async def snusbase(query: str, search_type: str):
     q = str(query).strip()
-    snus_type = "password" if detect_type(query) == "pass" else "email"
+    snus_type = "password" if search_type == "pass" else "email"
     payload = {"terms": [q], "types": [snus_type], "wildcard": False}
     async with httpx.AsyncClient(timeout=8) as client:
         for key in SNUSBASE_KEYS:
             try:
                 r = await client.post(SNUSBASE_URL, json=payload, headers={"Auth": key})
                 if r.status_code == 200:
-                    return {"source": "Snusbase", "data": r.json()}
+                    return r.json()
             except:
                 continue
     return None
@@ -143,7 +178,7 @@ async def ofdata(query: str):
         try:
             r = await client.get(f"{OFDATA_BASE}/search?key={OFDATA_KEY}&query={q}")
             if r.status_code == 200:
-                return {"source": "Ofdata", "data": r.json()}
+                return r.json()
         except:
             pass
     return None
@@ -154,7 +189,10 @@ async def infinity_check(query: str):
         try:
             r = await client.get(f"{INFINITY_URL}?fio={q}&token={INFINITY_KEY}")
             if r.status_code == 200:
-                return {"source": "InfinityCheck", "data": r.json()}
+                try:
+                    return r.json()
+                except:
+                    return r.text
         except:
             pass
     return None
@@ -166,7 +204,7 @@ async def lookup_phone_via_seon(query: str):
         try:
             r = await client.post(SEON_URL, json={"phone": clean_phone}, headers={"X-API-KEY": SEON_KEY})
             if r.status_code == 200:
-                return {"source": "SEON", "data": r.json()}
+                return r.json()
         except:
             pass
     return None
@@ -177,7 +215,7 @@ async def lookup_vk(query: str):
         try:
             r = await client.get(f"https://api.vk.com/method/users.get?user_ids={q}&access_token={VK_TOKEN}&v=5.199&fields=first_name,last_name,bdate,city,country,contacts,online")
             if r.status_code == 200:
-                return {"source": "VK", "data": r.json()}
+                return r.json()
         except:
             pass
     return None
@@ -188,68 +226,68 @@ async def lookup_shodan(query: str):
         try:
             r = await client.get(f"{SHODAN_BASE_URL}/shodan/host/{q}?key={SHODAN_KEY}")
             if r.status_code == 200:
-                return {"source": "Shodan", "data": r.json()}
+                return r.json()
             if r.status_code == 403:
                 r_fallback = await client.get(f"https://internetdb.shodan.io/{q}")
                 if r_fallback.status_code == 200:
-                    return {"source": "Shodan (InternetDB Fallback)", "data": r_fallback.json()}
+                    return r_fallback.json()
         except:
             pass
     return None
 
-class SearchRequest(BaseModel):
-    query: str
-    api_key: Optional[str] = None
+@app.get("/")
+async def home():
+    return {"name": "EasyApi", "author": "@y3Huk_iphone"}
 
-async def get_ip(request: Request):
-    forwarded = request.headers.get('X-Forwarded-For')
-    if forwarded:
-        return forwarded.split(',')[0].strip()
-    client_ip = request.client.host if request.client else "127.0.0.1"
-    return client_ip
-
-@app.api_route('/search', methods=['GET', 'POST'])
+@app.api_route("/search", methods=["GET", "POST"])
 async def search(request: Request):
     try:
         ip = await get_ip(request)
-        api_key = request.headers.get('X-API-Key')
+        api_key = request.headers.get("X-API-Key")
         
-        if request.method == 'GET':
-            query = request.query_params.get('query')
-            if not query:
-                for param in ['pass', 'email', 'inn', 'text', 'фио', 'fio', 'phone', 'vkid', 'ip', 'snils', 'passport', 'ogrn', 'company']:
-                    val = request.query_params.get(param)
-                    if val:
-                        query = val
-                        break
-            if not query:
-                return {"error": "Missing search term"}, 400
+        query = None
+        search_type = None
+        
+        if request.method == "GET":
+            for param in ['pass', 'email', 'inn', 'text', 'фио', 'fio', 'phone', 'vkid', 'ip', 'snils', 'passport', 'ogrn', 'company', 'query']:
+                val = request.query_params.get(param)
+                if val:
+                    query = val
+                    if param != 'query':
+                        search_type = param
+                    break
         else:
-            data = await request.json()
-            if not data:
-                return {"error": "Invalid JSON"}, 400
-            query = data.get('query')
+            try:
+                data = await request.json()
+            except:
+                data = {}
+            for param in ['pass', 'email', 'inn', 'text', 'фио', 'fio', 'phone', 'vkid', 'ip', 'snils', 'passport', 'ogrn', 'company', 'query']:
+                val = data.get(param)
+                if val:
+                    query = val
+                    if param != 'query':
+                        search_type = param
+                    break
             if not query:
-                for param in ['pass', 'email', 'inn', 'text', 'фио', 'fio', 'phone', 'vkid', 'ip', 'snils', 'passport', 'ogrn', 'company']:
-                    val = data.get(param)
-                    if val:
-                        query = val
-                        break
-            if not query:
-                api_key = data.get('api_key')
                 query = data.get('query')
-            if not query:
-                return {"error": "Missing search term"}, 400
+        
+        if not query:
+            return JSONResponse({"error": "Missing search term"}, 400)
+        
+        query = sanitize_query(query)
+        
+        if not search_type:
+            search_type = detect_type(query)
         
         if not await check_auth(api_key, ip):
-            raise HTTPException(status_code=401, detail="Unauthorized")
-        
-        query = re.sub(r'[^a-zA-Z0-9\s@\.\-_+:яёА-ЯЁ]', '', str(query))
-        search_type = detect_type(query)
+            ip_addr = await get_ip(request)
+            if await is_banned(ip_addr):
+                return JSONResponse({"error": "Your IP is banned for 30 days."}, 403)
+            return JSONResponse({"error": "Unauthorized."}, 401)
         
         tasks = []
         if search_type in ["email", "pass"]:
-            tasks.append(snusbase(query))
+            tasks.append(snusbase(query, search_type))
         if search_type in ["inn", "text", "фио", "fio", "snils", "passport", "ogrn", "company"]:
             tasks.append(ofdata(query))
         if search_type in ["phone", "email", "text", "фио", "fio", "company"]:
@@ -262,34 +300,36 @@ async def search(request: Request):
             tasks.append(lookup_shodan(query))
         
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        data = [r for r in results if r and not isinstance(r, Exception)]
+        all_data = [r for r in results if r and not isinstance(r, Exception)]
         
-        return {
+        return JSONResponse({
             "query": query,
             "type": search_type,
-            "found": len(data) > 0,
-            "data": data if data else None
-        }
+            "found": len(all_data) > 0,
+            "data": all_data if all_data else None
+        })
     except Exception as e:
-        return {"error": str(e)}, 500
+        return JSONResponse({"error": "Internal server error", "details": str(e)}, 500)
 
-@app.route('/key/create', methods=['GET', 'POST'])
+@app.api_route("/key/create", methods=["GET", "POST"])
 async def create_key(request: Request):
     try:
-        master = request.headers.get('X-Master-Key') or request.query_params.get('master_key')
-        if request.method == 'POST':
-            data = await request.json()
-            master = data.get('master_key') if data else master
-        if master != MASTER_KEY:
-            return {"error": "Unauthorized"}, 401
+        master = request.headers.get("X-Master-Key")
+        if request.method == "GET":
+            master = master or request.query_params.get("master_key")
+            new_key = request.query_params.get("new_key")
+            duration_param = request.query_params.get("duration")
+        else:
+            try:
+                data = await request.json()
+            except:
+                data = {}
+            master = master or data.get("master_key")
+            new_key = data.get("new_key")
+            duration_param = data.get("duration")
         
-        new_key = request.query_params.get('new_key')
-        duration_param = request.query_params.get('duration')
-        if request.method == 'POST':
-            data = await request.json()
-            if data:
-                new_key = data.get('new_key', new_key)
-                duration_param = data.get('duration', duration_param)
+        if master != MASTER_KEY:
+            return JSONResponse({"error": "Unauthorized."}, 401)
         
         global ALLOWED_KEYS
         if not new_key:
@@ -299,7 +339,7 @@ async def create_key(request: Request):
                     break
         else:
             if new_key in ALLOWED_KEYS:
-                return {"error": "Already exists"}, 400
+                return JSONResponse({"error": "Already exists."}, 400)
         
         expires_at_str = None
         if duration_param:
@@ -308,87 +348,66 @@ async def create_key(request: Request):
                 expire_datetime = datetime.now() + time_delta
                 expires_at_str = expire_datetime.strftime("%Y-%m-%d %H:%M:%S")
             else:
-                return {"error": "Invalid duration format"}, 400
+                return JSONResponse({"error": "Invalid duration format."}, 400)
         
         ALLOWED_KEYS[new_key] = {"expires_at": expires_at_str}
         save_keys()
         
         log_msg = f"[CREATE LOG] [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Ключ: '{new_key}' | Истекает: {expires_at_str if expires_at_str else 'Permanent'}"
-        print(log_msg)
+        write_to_log(log_msg)
         
-        return {
+        return JSONResponse({
             "success": True,
             "key": new_key,
             "expires_at": expires_at_str if expires_at_str else "Permanent"
-        }
+        })
     except Exception as e:
-        return {"error": str(e)}, 500
+        return JSONResponse({"error": str(e)}, 500)
 
-@app.route('/key/delete', methods=['GET', 'POST'])
+@app.api_route("/key/delete", methods=["GET", "POST"])
 async def delete_key(request: Request):
     try:
-        master = request.headers.get('X-Master-Key') or request.query_params.get('master_key')
-        if request.method == 'POST':
-            data = await request.json()
-            master = data.get('master_key') if data else master
-        if master != MASTER_KEY:
-            return {"error": "Unauthorized"}, 401
+        master = request.headers.get("X-Master-Key")
+        if request.method == "GET":
+            master = master or request.query_params.get("master_key")
+            target_key = request.query_params.get("target_key")
+        else:
+            try:
+                data = await request.json()
+            except:
+                data = {}
+            master = master or data.get("master_key")
+            target_key = data.get("target_key")
         
-        target_key = request.query_params.get('target_key')
-        if request.method == 'POST':
-            data = await request.json()
-            if data:
-                target_key = data.get('target_key', target_key)
+        if master != MASTER_KEY:
+            return JSONResponse({"error": "Unauthorized."}, 401)
+        
         if not target_key:
-            return {"error": "Missing parameter"}, 400
+            return JSONResponse({"error": "Missing parameter."}, 400)
         
         global ALLOWED_KEYS
         if target_key not in ALLOWED_KEYS:
-            return {"error": "Not found"}, 404
+            return JSONResponse({"error": "Not found."}, 404)
         
         del ALLOWED_KEYS[target_key]
         save_keys()
         
         log_msg = f"[DELETE LOG] [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Удален ключ: '{target_key}'"
-        print(log_msg)
+        write_to_log(log_msg)
         
-        return {"success": True, "message": "Removed"}
+        return JSONResponse({"success": True, "message": "Removed."})
     except Exception as e:
-        return {"error": str(e)}, 500
+        return JSONResponse({"error": str(e)}, 500)
 
-@app.route('/key/list', methods=['GET'])
+@app.get("/key/list")
 async def list_keys(request: Request):
     try:
-        master = request.headers.get('X-Master-Key') or request.query_params.get('master_key')
+        master = request.headers.get("X-Master-Key") or request.query_params.get("master_key")
         if master != MASTER_KEY:
-            return {"error": "Unauthorized"}, 401
-        return {"allowed_api_keys": ALLOWED_KEYS}
+            return JSONResponse({"error": "Unauthorized."}, 401)
+        return JSONResponse({"allowed_api_keys": ALLOWED_KEYS})
     except Exception as e:
-        return {"error": str(e)}, 500
-
-@app.route('/', methods=['GET'])
-async def home():
-    return {"name": "EasyApi", "author": "@y3Huk_iphone"}
-
-def generate_random_key(length=24):
-    alphabet = string.ascii_letters + string.digits
-    return ''.join(secrets.choice(alphabet) for _ in range(length))
-
-def parse_duration(duration_str):
-    if not duration_str:
-        return None
-    match = re.match(r'^(\d+)\s*(day|days|hour|hours|min|mins|minute|minutes)$', str(duration_str).strip().lower())
-    if not match:
-        return None
-    amount = int(match.group(1))
-    unit = match.group(2)
-    if 'day' in unit:
-        return timedelta(days=amount)
-    elif 'hour' in unit:
-        return timedelta(hours=amount)
-    elif 'min' in unit:
-        return timedelta(minutes=amount)
-    return None
+        return JSONResponse({"error": str(e)}, 500)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))

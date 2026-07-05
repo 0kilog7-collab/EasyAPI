@@ -1,37 +1,26 @@
-from fastapi import FastAPI, Request, Query
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 import requests
 import re
 import os
-import json
-import secrets
-import string
-from datetime import datetime, timedelta
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import uvicorn
 
 app = FastAPI()
 
-MASTER_KEY = "hsjdjfhrnjdjd72jrhfbsbxjdndn772hdjd92hrjdjx72nrkfusk8qkrklmrwoco52jrmfn95eufjr"
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-KEYS_FILE = os.path.join(BASE_DIR, "api_keys.json")
-LOG_FILE = os.path.join(BASE_DIR, "keys_log.txt")
-
-SNUSBASE_KEYS = [
-    "sb5029dec66mht55m78fx8bsw6tm8a",
-    "sbmeovhou6ecsn9fd9wcwnwwvsvwnc"
-]
+# ====== КЛЮЧИ ======
+SNUSBASE_KEYS = ["sb5029dec66mht55m78fx8bsw6tm8a", "sbmeovhou6ecsn9fd9wcwnwwvsvwnc"]
 OFDATA_KEY = "DiC9ALodH5T12BfR"
 INFINITY_KEY = "N7xQ4Lp2ZWk8F5VcD1mR9H6TyU3E0BJa"
 SEON_KEY = "758f5f54-befb-4125-bd17-931689af6633"
 VK_TOKEN = "0af157510af157510af15751aa0a89e69600af10af157516a0bc15996e74fe2b440998c"
 SHODAN_KEY = "xx6gSg9pWYmJcND1hEMbcWuOJtjbHSZ5"
-
 DEPSEARCH_TOKEN = "WDTHx2vqZGE38gchBe7oAewzB9ZPNpxU"
 DEPSEARCH_BACKUP_TOKEN = "XV1rGjJyryowCyGMKqfJ72ozJtF0bhoF"
 FADE_KEY = "jupit-54cb687d48b31e8234d6ab7f4f"
 
+# ====== URL ======
 SNUSBASE_URL = "https://api.snusbase.com/data/search"
 OFDATA_BASE = "https://api.ofdata.ru/v2"
 INFINITY_URL = "https://infinity-search.fun/find.php"
@@ -39,123 +28,6 @@ SEON_URL = "https://api.seon.io/SeonRestService/phone-api/v2"
 SHODAN_BASE_URL = "https://api.shodan.io"
 FADE_URL = "https://graph.maybebot.icu/japi/v2/search"
 HTMLWEB_GEO_URL = "https://htmlweb.ru/geo/api.php"
-
-ALLOWED_KEYS = {}
-banned_ips = {}
-failed_attempts = {}
-
-def load_keys():
-    global ALLOWED_KEYS
-    default_keys = {"hdhxhs827dhsb": {"expires_at": None}}
-    if not os.path.exists(KEYS_FILE):
-        try:
-            with open(KEYS_FILE, 'w', encoding='utf-8') as f:
-                json.dump(default_keys, f, indent=2, ensure_ascii=False)
-        except:
-            pass
-        return default_keys
-    try:
-        with open(KEYS_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            if isinstance(data, list):
-                migrated = {k: {"expires_at": None} for k in data}
-                with open(KEYS_FILE, 'w', encoding='utf-8') as wf:
-                    json.dump(migrated, wf, indent=2, ensure_ascii=False)
-                return migrated
-            return data
-    except:
-        return default_keys
-
-ALLOWED_KEYS = load_keys()
-
-def save_keys_to_file():
-    try:
-        with open(KEYS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(ALLOWED_KEYS, f, indent=2, ensure_ascii=False)
-    except:
-        pass
-
-def write_to_log(message):
-    print(message)
-    try:
-        with open(LOG_FILE, 'a', encoding='utf-8') as f:
-            f.write(f"{message}\n")
-    except Exception as e:
-        print(f"[ERROR LOGGING] {e}")
-
-def generate_random_key(length=24):
-    alphabet = string.ascii_letters + string.digits
-    return ''.join(secrets.choice(alphabet) for _ in range(length))
-
-def parse_duration(duration_str):
-    if not duration_str:
-        return None
-    match = re.match(r'^(\d+)\s*(day|days|hour|hours|min|mins|minute|minutes)$', str(duration_str).strip().lower())
-    if not match:
-        return None
-    amount = int(match.group(1))
-    unit = match.group(2)
-    if 'day' in unit:
-        return timedelta(days=amount)
-    elif 'hour' in unit:
-        return timedelta(hours=amount)
-    elif 'min' in unit:
-        return timedelta(minutes=amount)
-    return None
-
-def get_real_ip(request: Request):
-    forwarded = request.headers.get('X-Forwarded-For')
-    if forwarded:
-        return forwarded.split(',')[0].strip()
-    return request.client.host if request.client else "127.0.0.1"
-
-def is_ip_banned(ip):
-    if ip in banned_ips:
-        if datetime.now() < banned_ips[ip]:
-            return True
-        else:
-            del banned_ips[ip]
-    return False
-
-def ban_ip(ip, days=30):
-    banned_ips[ip] = datetime.now() + timedelta(days=days)
-
-def check_auth(request: Request):
-    ip = get_real_ip(request)
-    auth_key = request.headers.get("X-API-Key") or request.query_params.get("api_key")
-    
-    if is_ip_banned(ip):
-        return False
-    
-    if ip in failed_attempts and failed_attempts[ip] >= 15:
-        ban_ip(ip, 30)
-        return False
-    
-    if not auth_key:
-        failed_attempts[ip] = failed_attempts.get(ip, 0) + 1
-        return False
-    
-    if auth_key == MASTER_KEY:
-        failed_attempts[ip] = 0
-        return True
-    
-    if auth_key in ALLOWED_KEYS:
-        expires_at_str = ALLOWED_KEYS[auth_key].get("expires_at")
-        if expires_at_str:
-            expires_at = datetime.strptime(expires_at_str, "%Y-%m-%d %H:%M:%S")
-            if datetime.now() > expires_at:
-                write_to_log(f"[EXPIRED LOG] [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Ключ '{auth_key}' заблокирован ({expires_at_str}).")
-                return False
-        failed_attempts[ip] = 0
-        return True
-    
-    failed_attempts[ip] = failed_attempts.get(ip, 0) + 1
-    return False
-
-def sanitize_query(query):
-    if not query:
-        return query
-    return re.sub(r'[^a-zA-Z0-9\s@\.\-_+:яёА-ЯЁ]', '', query)
 
 SUPPORTED_PARAMS = ['pass', 'email', 'inn', 'text', 'фио', 'fio', 'phone', 'vkid', 'ip', 'snils', 'passport', 'ogrn', 'company']
 
@@ -182,6 +54,8 @@ def detect_type(query):
     if re.match(r'^[А-ЯЁA-Z][а-яёa-zА-ЯЁA-Z0-9\s\-\.\,]+$', q) and len(q) > 3:
         return "company"
     return "text"
+
+# ====== ПРОВЕРКИ ======
 
 def snusbase(query, search_type):
     try:
@@ -417,15 +291,10 @@ def check_fadeapi(query, search_type):
     except:
         return {"source": "FadeAPI", "error": 504}
 
+# ====== ОСНОВНОЙ ЭНДПОИНТ ======
 @app.api_route("/search", methods=["GET", "POST"])
 async def search(request: Request):
     try:
-        if not check_auth(request):
-            ip = get_real_ip(request)
-            if is_ip_banned(ip):
-                return JSONResponse({"error": "Your IP is banned for 30 days."}, 403)
-            return JSONResponse({"error": "Unauthorized."}, 401)
-
         query = None
         search_type = None
 
@@ -453,8 +322,6 @@ async def search(request: Request):
         
         if not query:
             return JSONResponse({"error": "Missing search term"}, 400)
-        
-        query = sanitize_query(query)
         
         if not search_type:
             search_type = detect_type(query)
@@ -503,118 +370,6 @@ async def search(request: Request):
         return JSONResponse(result)
     except Exception as e:
         return JSONResponse({"error": "Internal server error", "details": str(e)}, 500)
-
-@app.api_route("/key/create", methods=["POST", "GET"])
-async def create_key(request: Request):
-    try:
-        master = request.headers.get("X-Master-Key") or request.query_params.get("master_key")
-        if request.method == "POST":
-            try:
-                data = await request.json()
-            except:
-                data = {}
-            if not master:
-                master = data.get("master_key")
-        
-        if master != MASTER_KEY:
-            return JSONResponse({"error": "Unauthorized."}, 401)
-        
-        new_key = request.query_params.get("new_key")
-        duration_param = request.query_params.get("duration")
-        if request.method == "POST":
-            try:
-                data = await request.json()
-            except:
-                data = {}
-            if not new_key:
-                new_key = data.get("new_key")
-            if not duration_param:
-                duration_param = data.get("duration")
-        
-        global ALLOWED_KEYS
-
-        if not new_key:
-            while True:
-                new_key = generate_random_key(24)
-                if new_key not in ALLOWED_KEYS:
-                    break
-        else:
-            if new_key in ALLOWED_KEYS:
-                return JSONResponse({"error": "Already exists."}, 400)
-        
-        expires_at_str = None
-        if duration_param:
-            time_delta = parse_duration(duration_param)
-            if time_delta:
-                expire_datetime = datetime.now() + time_delta
-                expires_at_str = expire_datetime.strftime("%Y-%m-%d %H:%M:%S")
-            else:
-                return JSONResponse({"error": "Invalid duration format."}, 400)
-        
-        ALLOWED_KEYS[new_key] = {"expires_at": expires_at_str}
-        save_keys_to_file()
-        
-        log_msg = f"[CREATE LOG] [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Ключ: '{new_key}' | Истекает: {expires_at_str if expires_at_str else 'Permanent'}"
-        write_to_log(log_msg)
-        
-        return JSONResponse({
-            "success": True,
-            "key": new_key,
-            "expires_at": expires_at_str if expires_at_str else "Permanent"
-        })
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, 500)
-
-@app.api_route("/key/delete", methods=["POST", "GET"])
-async def delete_key(request: Request):
-    try:
-        master = request.headers.get("X-Master-Key") or request.query_params.get("master_key")
-        if request.method == "POST":
-            try:
-                data = await request.json()
-            except:
-                data = {}
-            if not master:
-                master = data.get("master_key")
-        
-        if master != MASTER_KEY:
-            return JSONResponse({"error": "Unauthorized."}, 401)
-        
-        target_key = request.query_params.get("target_key")
-        if request.method == "POST":
-            try:
-                data = await request.json()
-            except:
-                data = {}
-            if not target_key:
-                target_key = data.get("target_key")
-        
-        if not target_key:
-            return JSONResponse({"error": "Missing parameter."}, 400)
-        
-        global ALLOWED_KEYS
-        if target_key not in ALLOWED_KEYS:
-            return JSONResponse({"error": "Not found."}, 404)
-        
-        del ALLOWED_KEYS[target_key]
-        save_keys_to_file()
-        
-        log_msg = f"[DELETE LOG] [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Удален ключ: '{target_key}'"
-        write_to_log(log_msg)
-        
-        return JSONResponse({"success": True, "message": "Removed."})
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, 500)
-
-@app.get("/key/list")
-async def list_keys(request: Request):
-    try:
-        master = request.headers.get("X-Master-Key") or request.query_params.get("master_key")
-        if master != MASTER_KEY:
-            return JSONResponse({"error": "Unauthorized."}, 401)
-        return JSONResponse({"allowed_api_keys": ALLOWED_KEYS})
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, 500)
 
 @app.get("/")
 async def home():

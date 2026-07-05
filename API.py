@@ -368,8 +368,8 @@ async def search_password(query: str = Query(..., description="Пароль")):
     results = await search_all(query, "password")
     return JSONResponse(content={"query": query, "type": "password", "results": results})
 
-# ====== ЗАПУСК ======
+
 if __name__ == "__main__":
     import uvicorn
-    print("Router API Gateway запускается...")
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    port = int(os.environ.get("PORT", 8080))
+    uvicorn.run(app, host="0.0.0.0", port=port)

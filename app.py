@@ -237,64 +237,22 @@ def snusbase(query, search_type):
     except:
         return {"source": "Snusbase", "error": 504}
 
-def ofdata(query, search_type):
+def ofdata_inn_only(query):
+    """Опрашивает Ofdata исключительно по ИНН"""
     q = str(query).strip()
     headers = {"User-Agent": "Mozilla/5.0"}
     collected_data = {}
-    status_code = 404
-
-    type_map = {
-        "inn": ("person", "inn"), "phone": ("search", "phone"), "email": ("search", "email"),
-        "passport": ("person", "passport"), "snils": ("person", "snils"), "fio": ("search", "fio"),
-        "фио": ("search", "fio"), "ogrn": ("company", "ogrn"), "company": ("company", "query"),
-        "text": ("search", "query")
-    }
-    endpoint, param = type_map.get(search_type, ("search", "query"))
     
-    if search_type == "company":
-        if re.match(r'^\d{10}$|^\d{12}$', q):
-            url = f"{OFDATA_BASE}/company?key={OFDATA_KEY}&inn={q}"
-        elif re.match(r'^\d{13}$', q):
-            url = f"{OFDATA_BASE}/company?key={OFDATA_KEY}&ogrn={q}"
-        else:
-            url = f"{OFDATA_BASE}/company?key={OFDATA_KEY}&query={requests.utils.quote(q)}"
-        try:
-            r = requests.get(url, headers=headers, timeout=8)
-            status_code = r.status_code
-            if r.status_code == 200:
-                collected_data["company_info"] = r.json()
-        except:
-            status_code = 504
-        return {"source": "Ofdata", "data": collected_data} if collected_data else {"source": "Ofdata", "error": status_code}
-
-    if search_type in ["fio", "фио"]:
-        parts = q.split()
-        if len(parts) >= 2:
-            params = {
-                "key": OFDATA_KEY, "first_name": parts[0], "last_name": parts[1],
-                "middle_name": parts[2] if len(parts) > 2 else ""
-            }
-            url = f"{OFDATA_BASE}/search"
-            try:
-                r = requests.get(url, headers=headers, params=params, timeout=8)
-                status_code = r.status_code
-                if r.status_code == 200:
-                    collected_data["search_results"] = r.json()
-            except:
-                status_code = 504
-            return {"source": "Ofdata", "data": collected_data} if collected_data else {"source": "Ofdata", "error": status_code}
-
-    params = {"key": OFDATA_KEY, param: q}
-    url = f"{OFDATA_BASE}/{endpoint}"
+    params = {"key": OFDATA_KEY, "inn": q}
+    url = f"{OFDATA_BASE}/person"
     try:
         r = requests.get(url, headers=headers, params=params, timeout=8)
-        status_code = r.status_code
         if r.status_code == 200:
             collected_data["result"] = r.json()
+            return {"source": "Ofdata", "data": collected_data}
+        return {"source": "Ofdata", "error": r.status_code}
     except:
-        status_code = 504
-
-    return {"source": "Ofdata", "data": collected_data} if collected_data else {"source": "Ofdata", "error": status_code}
+        return {"source": "Ofdata", "error": 504}
 
 def infinity_check(query, search_type):
     try:
@@ -431,8 +389,9 @@ async def search(request: Request):
                 futures[executor.submit(reason_search, query, search_type)] = "reason"
             if search_type in ["email", "pass"]:
                 futures[executor.submit(snusbase, query, search_type)] = "sn"
-            if search_type in ["inn", "text", "фио", "fio", "snils", "passport", "ogrn", "company"]:
-                futures[executor.submit(ofdata, query, search_type)] = "of"
+            # Ofdata опрашивается исключительно при поиске по ИНН
+            if search_type == "inn":
+                futures[executor.submit(ofdata_inn_only, query)] = "of"
             if search_type in ["phone", "email", "text", "фио", "fio", "company"]:
                 futures[executor.submit(infinity_check, query, search_type)] = "inf"
             if search_type == "phone":
@@ -527,7 +486,7 @@ async def delete_key(request: Request):
             try:
                 data = await request.json()
             except:
-                                data = {}
+                data = {}
             if not master:
                 master = data.get("master_key")
         
@@ -559,3 +518,21 @@ async def delete_key(request: Request):
         return render_json({"success": True, "message": "Removed."})
     except Exception as e:
         return render_json({"error": str(e)}, 500)
+
+@app.get("/key/list")
+async def list_keys(request: Request):
+    try:
+        master = request.headers.get("X-Master-Key") or request.query_params.get("master_key")
+        if master != MASTER_KEY:
+            return render_json({"error": "Unauthorized."}, 401)
+        return render_json({"allowed_api_keys": ALLOWED_KEYS})
+    except Exception as e:
+        return render_json({"error": str(e)}, 500)
+
+@app.get("/")
+async def home():
+    return render_json({"name": "EasyApi", "author": "@y3Huk_iphone"})
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port, workers=1)

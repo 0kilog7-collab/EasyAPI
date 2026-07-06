@@ -208,13 +208,26 @@ def reason_search(query, search_type):
             "vkid": "vk", "nick": "nick", "telegram": "telegram", "vin": "vin", "text": "fio"
         }
         api_type = type_mapping.get(search_type, "fio")
-        headers = {"access_token": REASON_KEY, "Content-Type": "application/json"}
-        payload = {"search_type": api_type, "query": str(query).strip()}
+        
+        # Если это номер телефона, гарантируем очистку от лишних символов перед отправкой
+        clean_query = str(query).strip()
+        if api_type == "phone":
+            clean_query = re.sub(r'[^\d]', '', clean_query)
+
+        headers = {
+            "access_token": REASON_KEY, 
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "search_type": api_type, 
+            "query": clean_query
+        }
+        
         r = requests.post(REASON_URL, headers=headers, json=payload, timeout=10)
         if r.status_code == 200:
             return {"source": "ReasonAPI", "data": r.json()}
         return {"source": "ReasonAPI", "error": r.status_code}
-    except:
+    except Exception as e:
         return {"source": "ReasonAPI", "error": 504}
 
 def snusbase(query, search_type):
@@ -271,6 +284,7 @@ def infinity_check(query, search_type):
         param_name = None
         if search_type == "phone":
             param_name = "phone"
+            q = re.sub(r'[^\d]', '', q)  # Очистка номера для Infinity
         elif search_type == "email":
             param_name = "email"
         elif search_type in ["text", "фио", "fio", "company"]:
@@ -381,6 +395,10 @@ async def search(request: Request):
         if not search_type:
             search_type = detect_type(query)
         
+        # Общая нормализация запроса для типов телефонных номеров
+        if search_type == "phone":
+            query = re.sub(r'[^\d]', '', str(query).strip())
+
         result = {"query": query, "type": search_type, "found": False, "data": None}
         
         with ThreadPoolExecutor(max_workers=4) as executor:
@@ -389,7 +407,6 @@ async def search(request: Request):
                 futures[executor.submit(reason_search, query, search_type)] = "reason"
             if search_type in ["email", "pass"]:
                 futures[executor.submit(snusbase, query, search_type)] = "sn"
-            # Ofdata опрашивается исключительно при поиске по ИНН
             if search_type == "inn":
                 futures[executor.submit(ofdata_inn_only, query)] = "of"
             if search_type in ["phone", "email", "text", "фио", "fio", "company"]:
@@ -524,7 +541,7 @@ async def list_keys(request: Request):
     try:
         master = request.headers.get("X-Master-Key") or request.query_params.get("master_key")
         if master != MASTER_KEY:
-            return render_json({"error": "Unauthorized."}, 401)
+                        return render_json({"error": "Unauthorized."}, 401)
         return render_json({"allowed_api_keys": ALLOWED_KEYS})
     except Exception as e:
         return render_json({"error": str(e)}, 500)
@@ -536,3 +553,4 @@ async def home():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     uvicorn.run(app, host="0.0.0.0", port=port, workers=1)
+

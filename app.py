@@ -1,557 +1,906 @@
-from fastapi import FastAPI, Request, Query, Response
-import requests
-import re
-import os
-import json
-import secrets
-import string
-from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor, as_completed
+#!/usr/bin/env python3
+
 import asyncio
-import httpx
+import json
+import logging
+import time
+import uuid
+from contextlib import asynccontextmanager
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Set
+from dataclasses import dataclass, asdict
+from enum import Enum
+
 import uvicorn
+from fastapi import FastAPI, HTTPException, Query, Header, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, validator
+import httpx
 
-app = FastAPI()
+CONFIG = {
+    "HOST": "0.0.0.0",
+    "PORT": 8000,
+    "MASTER_API_KEY": "hsjdjfhrnjdjd72jrhfbsbxjdndn772hdjd92hrjdjx72nrkfusk8qkrklmrwoco52jrmfn95eufjr",
+    "EXTERNAL_APIS": {
+        "snusbase": {
+            "api_key": "sb5029dec66mht55m78fx8bsw6tm8a",
+            "base_url": "https://api.snusbase.com",
+            "timeout": 30
+        },
+        "infinity": {
+            "api_key": "N7xQ4Lp2ZWk8F5VcD1mR9H6TyU3E0BJa",
+            "base_url": "https://infinity-search.fun",
+            "timeout": 30
+        },
+        "seon": {
+            "api_key": "758f5f54-befb-4125-bd17-931689af6633",
+            "base_url": "https://api.seon.io",
+            "timeout": 30
+        },
+        "htmlweb": {
+            "api_key": "",
+            "base_url": "https://htmlweb.ru",
+            "timeout": 30
+        },
+        "depsearch": {
+            "api_key": "WDTHx2vqZGE38gchBe7oAewzB9ZPNpxU",
+            "base_url": "https://api.depsearch.sbs",
+            "timeout": 30
+        },
+        "fadeapi": {
+            "api_key": "jupit-54cb687d48b31e8234d6ab7f4f",
+            "base_url": "https://graph.maybebot.icu",
+            "timeout": 30
+        },
+        "shodan": {
+            "api_key": "xx6gSg9pWYmJcND1hEMbcWuOJtjbHSZ5",
+            "base_url": "https://api.shodan.io",
+            "timeout": 30
+        },
+        "vk": {
+            "api_key": "0af157510af157510af15751aa0a89e69600af10af157516a0bc15996e74fe2b440998c",
+            "base_url": "https://api.vk.com",
+            "timeout": 30
+        },
+        "ofdata": {
+            "api_key": "DiC9ALodH5T12BfR",
+            "base_url": "https://api.ofdata.ru",
+            "timeout": 30
+        }
+    },
+    "DEFAULT_RATE_LIMIT": 1000,
+    "DEFAULT_RATE_LIMIT_PERIOD": 3600,
+    "LOG_LEVEL": "INFO",
+    "LOG_FILE": "search_aggregator.log"
+}
 
-MASTER_KEY = "hsjdjfhrnjdjd72jrhfbsbxjdndn772hdjd92hrjdjx72nrkfusk8qkrklmrwoco52jrmfn95eufjr"
+def setup_logging():
+    logging.basicConfig(
+        level=getattr(logging, CONFIG["LOG_LEVEL"]),
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(CONFIG["LOG_FILE"]),
+            logging.StreamHandler()
+        ]
+    )
+    return logging.getLogger(__name__)
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-KEYS_FILE = os.path.join(BASE_DIR, "api_keys.json")
-LOG_FILE = os.path.join(BASE_DIR, "keys_log.txt")
+logger = setup_logging()
 
-# API Keys Configuration
-SNUSBASE_KEYS = [
-    "sb5029dec66mht55m78fx8bsw6tm8a",
-    "sbmeovhou6ecsn9fd9wcwnwwvsvwnc"
-]
-OFDATA_KEY = "DiC9ALodH5T12BfR"
-INFINITY_KEY = "N7xQ4Lp2ZWk8F5VcD1mR9H6TyU3E0BJa"
-SEON_KEY = "758f5f54-befb-4125-bd17-931689af6633"
-VK_TOKEN = "0af157510af157510af15751aa0a89e69600af10af157516a0bc15996e74fe2b440998c"
-SHODAN_KEY = "xx6gSg9pWYmJcND1hEMbcWuOJtjbHSZ5"
-REASON_KEY = "jupit-54cb687d48b31e8234d6ab7f4f"
+class SearchType(Enum):
+    PHONE = "phone"
+    EMAIL = "email"
+    IP = "ip"
+    VK = "vk"
+    INN = "inn"
+    PASSPORT = "passport"
+    SNILS = "snils"
+    FIO = "fio"
+    OGRN = "ogrn"
+    COMPANY = "company"
+    ADDRESS = "address"
+    CAR = "car"
 
-# Endpoints
-SNUSBASE_URL = "https://api.snusbase.com/data/search"
-OFDATA_BASE = "https://api.ofdata.ru/v2"
-INFINITY_URL = "https://infinity-search.fun/find.php"
-SEON_URL = "https://api.seon.io/SeonRestService/phone-api/v2"
-SHODAN_BASE_URL = "https://api.shodan.io"
-REASON_URL = "https://graph.maybebot.icu/japi/v2/search"
+class APIKeyStatus(Enum):
+    ACTIVE = "active"
+    DISABLED = "disabled"
 
-ALLOWED_KEYS = {}
-banned_ips = {}
-failed_attempts = {}
+@dataclass
+class APIKeyInfo:
+    key: str
+    status: APIKeyStatus
+    created_at: str
+    rate_limit: int
+    rate_limit_period: int
+    request_count: int
+    last_used: Optional[str] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "key": self.key,
+            "status": self.status.value,
+            "created_at": self.created_at,
+            "rate_limit": self.rate_limit,
+            "rate_limit_period": self.rate_limit_period,
+            "request_count": self.request_count,
+            "last_used": self.last_used
+        }
 
-def render_json(data, status_code=200):
-    """Выводит чистый, неэкранированный UTF-8 JSON без маршалинга"""
-    return Response(
-        content=json.dumps(data, ensure_ascii=False, indent=2),
-        status_code=status_code,
-        media_type="application/json"
+class UnifiedResponse(BaseModel):
+    success: bool
+    query_type: str
+    query_value: str
+    results: List[Dict[str, Any]]
+    sources: Dict[str, Any]
+    timestamp: str
+    error: Optional[str] = None
+
+class CreateKeyRequest(BaseModel):
+    rate_limit: Optional[int] = Field(default=CONFIG["DEFAULT_RATE_LIMIT"])
+    rate_limit_period: Optional[int] = Field(default=CONFIG["DEFAULT_RATE_LIMIT_PERIOD"])
+
+class UpdateKeyRequest(BaseModel):
+    rate_limit: Optional[int] = None
+    rate_limit_period: Optional[int] = None
+
+class APIKeyManager:
+    def __init__(self):
+        self.keys: Dict[str, APIKeyInfo] = {}
+        self.master_key = CONFIG["MASTER_API_KEY"]
+        self._initialize_master_key()
+    
+    def _initialize_master_key(self):
+        master_info = APIKeyInfo(
+            key=self.master_key,
+            status=APIKeyStatus.ACTIVE,
+            created_at=datetime.utcnow().isoformat(),
+            rate_limit=-1,
+            rate_limit_period=0,
+            request_count=0
+        )
+        self.keys[self.master_key] = master_info
+        logger.info("Master API key initialized")
+    
+    def is_master_key(self, key: str) -> bool:
+        return key == self.master_key
+    
+    def is_valid_key(self, key: str) -> bool:
+        if key not in self.keys:
+            return False
+        return self.keys[key].status == APIKeyStatus.ACTIVE
+    
+    def create_key(self, rate_limit: int = CONFIG["DEFAULT_RATE_LIMIT"],
+                   rate_limit_period: int = CONFIG["DEFAULT_RATE_LIMIT_PERIOD"]) -> str:
+        new_key = f"sk_{uuid.uuid4().hex}"
+        key_info = APIKeyInfo(
+            key=new_key,
+            status=APIKeyStatus.ACTIVE,
+            created_at=datetime.utcnow().isoformat(),
+            rate_limit=rate_limit,
+            rate_limit_period=rate_limit_period,
+            request_count=0
+        )
+        self.keys[new_key] = key_info
+        logger.info(f"Created new API key: {new_key}")
+        return new_key
+    
+    def delete_key(self, key: str) -> bool:
+        if key == self.master_key:
+            logger.warning("Attempted to delete master key")
+            return False
+        if key in self.keys:
+            del self.keys[key]
+            logger.info(f"Deleted API key: {key}")
+            return True
+        return False
+    
+    def disable_key(self, key: str) -> bool:
+        if key == self.master_key:
+            logger.warning("Attempted to disable master key")
+            return False
+        if key in self.keys:
+            self.keys[key].status = APIKeyStatus.DISABLED
+            logger.info(f"Disabled API key: {key}")
+            return True
+        return False
+    
+    def enable_key(self, key: str) -> bool:
+        if key in self.keys:
+            self.keys[key].status = APIKeyStatus.ACTIVE
+            logger.info(f"Enabled API key: {key}")
+            return True
+        return False
+    
+    def get_all_keys(self) -> List[Dict[str, Any]]:
+        return [key_info.to_dict() for key_info in self.keys.values()]
+    
+    def get_key_stats(self, key: str) -> Optional[Dict[str, Any]]:
+        if key in self.keys:
+            return self.keys[key].to_dict()
+        return None
+    
+    def check_rate_limit(self, key: str) -> bool:
+        if key not in self.keys:
+            return False
+        
+        key_info = self.keys[key]
+        
+        if key_info.rate_limit == -1:
+            return True
+        
+        if key_info.request_count >= key_info.rate_limit:
+            logger.warning(f"Rate limit exceeded for key: {key}")
+            return False
+        
+        return True
+    
+    def record_request(self, key: str):
+        if key in self.keys:
+            self.keys[key].request_count += 1
+            self.keys[key].last_used = datetime.utcnow().isoformat()
+
+api_key_manager = APIKeyManager()
+
+class HTTPClient:
+    def __init__(self):
+        self.client = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
+    
+    async def close(self):
+        await self.client.aclose()
+    
+    async def get(self, url: str, headers: Optional[Dict[str, str]] = None,
+                  params: Optional[Dict[str, Any]] = None,
+                  timeout: int = 30) -> Dict[str, Any]:
+        try:
+            response = await self.client.get(
+                url,
+                headers=headers,
+                params=params,
+                timeout=timeout
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.TimeoutException:
+            logger.error(f"Timeout error for URL: {url}")
+            return {"error": "timeout", "message": "Request timed out"}
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP error for URL {url}: {e.response.status_code}")
+            return {"error": "http_error", "status_code": e.response.status_code, "message": str(e)}
+        except httpx.RequestError as e:
+            logger.error(f"Request error for URL {url}: {str(e)}")
+            return {"error": "request_error", "message": str(e)}
+        except json.JSONDecodeError:
+            logger.error(f"JSON decode error for URL: {url}")
+            return {"error": "json_error", "message": "Invalid JSON response"}
+        except Exception as e:
+            logger.error(f"Unexpected error for URL {url}: {str(e)}")
+            return {"error": "unexpected_error", "message": str(e)}
+    
+    async def post(self, url: str, headers: Optional[Dict[str, str]] = None,
+                   json_data: Optional[Dict[str, Any]] = None,
+                   timeout: int = 30) -> Dict[str, Any]:
+        try:
+            response = await self.client.post(
+                url,
+                headers=headers,
+                json=json_data,
+                timeout=timeout
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.TimeoutException:
+            logger.error(f"Timeout error for URL: {url}")
+            return {"error": "timeout", "message": "Request timed out"}
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP error for URL {url}: {e.response.status_code}")
+            return {"error": "http_error", "status_code": e.response.status_code, "message": str(e)}
+        except httpx.RequestError as e:
+            logger.error(f"Request error for URL {url}: {str(e)}")
+            return {"error": "request_error", "message": str(e)}
+        except json.JSONDecodeError:
+            logger.error(f"JSON decode error for URL: {url}")
+            return {"error": "json_error", "message": "Invalid JSON response"}
+        except Exception as e:
+            logger.error(f"Unexpected error for URL {url}: {str(e)}")
+            return {"error": "unexpected_error", "message": str(e)}
+
+http_client = HTTPClient()
+
+class SearchService:
+    def __init__(self, service_name: str, config: Dict[str, Any]):
+        self.service_name = service_name
+        self.api_key = config.get("api_key", "")
+        self.base_url = config.get("base_url", "")
+        self.timeout = config.get("timeout", 30)
+    
+    async def search_phone(self, query: str) -> Dict[str, Any]:
+        return {"error": "not_supported", "message": "Phone search not supported"}
+    
+    async def search_email(self, query: str) -> Dict[str, Any]:
+        return {"error": "not_supported", "message": "Email search not supported"}
+    
+    async def search_ip(self, query: str) -> Dict[str, Any]:
+        return {"error": "not_supported", "message": "IP search not supported"}
+    
+    async def search_vk(self, query: str) -> Dict[str, Any]:
+        return {"error": "not_supported", "message": "VK search not supported"}
+    
+    async def search_inn(self, query: str) -> Dict[str, Any]:
+        return {"error": "not_supported", "message": "INN search not supported"}
+    
+    async def search_passport(self, query: str) -> Dict[str, Any]:
+        return {"error": "not_supported", "message": "Passport search not supported"}
+    
+    async def search_snils(self, query: str) -> Dict[str, Any]:
+        return {"error": "not_supported", "message": "SNILS search not supported"}
+    
+    async def search_fio(self, query: str) -> Dict[str, Any]:
+        return {"error": "not_supported", "message": "FIO search not supported"}
+    
+    async def search_ogrn(self, query: str) -> Dict[str, Any]:
+        return {"error": "not_supported", "message": "OGRN search not supported"}
+    
+    async def search_company(self, query: str) -> Dict[str, Any]:
+        return {"error": "not_supported", "message": "Company search not supported"}
+    
+    async def search_address(self, query: str) -> Dict[str, Any]:
+        return {"error": "not_supported", "message": "Address search not supported"}
+    
+    async def search_car(self, query: str) -> Dict[str, Any]:
+        return {"error": "not_supported", "message": "Car search not supported"}
+
+class SnusbaseService(SearchService):
+    async def search_phone(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/search/phone"
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        params = {"query": query}
+        return await http_client.get(url, headers=headers, params=params, timeout=self.timeout)
+    
+    async def search_email(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/search/email"
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        params = {"query": query}
+        return await http_client.get(url, headers=headers, params=params, timeout=self.timeout)
+
+class InfinityService(SearchService):
+    async def search_phone(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/v1/phone"
+        headers = {"X-API-Key": self.api_key}
+        params = {"phone": query}
+        return await http_client.get(url, headers=headers, params=params, timeout=self.timeout)
+    
+    async def search_email(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/v1/email"
+        headers = {"X-API-Key": self.api_key}
+        params = {"email": query}
+        return await http_client.get(url, headers=headers, params=params, timeout=self.timeout)
+    
+    async def search_inn(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/v1/inn"
+        headers = {"X-API-Key": self.api_key}
+        params = {"inn": query}
+        return await http_client.get(url, headers=headers, params=params, timeout=self.timeout)
+    
+    async def search_fio(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/v1/fio"
+        headers = {"X-API-Key": self.api_key}
+        params = {"fio": query}
+        return await http_client.get(url, headers=headers, params=params, timeout=self.timeout)
+    
+    async def search_ogrn(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/v1/ogrn"
+        headers = {"X-API-Key": self.api_key}
+        params = {"ogrn": query}
+        return await http_client.get(url, headers=headers, params=params, timeout=self.timeout)
+    
+    async def search_company(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/v1/company"
+        headers = {"X-API-Key": self.api_key}
+        params = {"company": query}
+        return await http_client.get(url, headers=headers, params=params, timeout=self.timeout)
+    
+    async def search_address(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/v1/address"
+        headers = {"X-API-Key": self.api_key}
+        params = {"address": query}
+        return await http_client.get(url, headers=headers, params=params, timeout=self.timeout)
+    
+    async def search_car(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/v1/car"
+        headers = {"X-API-Key": self.api_key}
+        params = {"car": query}
+        return await http_client.get(url, headers=headers, params=params, timeout=self.timeout)
+
+class SeonService(SearchService):
+    async def search_phone(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/v1/phone"
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        json_data = {"phone": query}
+        return await http_client.post(url, headers=headers, json_data=json_data, timeout=self.timeout)
+
+class HTMLWebService(SearchService):
+    async def search_phone(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/geo/api.php"
+        params = {"json": "1", "telcod": query[:7]}
+        return await http_client.get(url, params=params, timeout=self.timeout)
+
+class DepSearchService(SearchService):
+    async def search_phone(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/quest={query}&token={self.api_key}"
+        headers = {"Accept": "application/json"}
+        return await http_client.get(url, headers=headers, timeout=self.timeout)
+    
+    async def search_email(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/quest={query}&token={self.api_key}"
+        headers = {"Accept": "application/json"}
+        return await http_client.get(url, headers=headers, timeout=self.timeout)
+    
+    async def search_ip(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/quest={query}&token={self.api_key}"
+        headers = {"Accept": "application/json"}
+        return await http_client.get(url, headers=headers, timeout=self.timeout)
+    
+    async def search_vk(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/quest={query}&token={self.api_key}"
+        headers = {"Accept": "application/json"}
+        return await http_client.get(url, headers=headers, timeout=self.timeout)
+    
+    async def search_inn(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/quest={query}&token={self.api_key}"
+        headers = {"Accept": "application/json"}
+        return await http_client.get(url, headers=headers, timeout=self.timeout)
+    
+    async def search_passport(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/quest={query}&token={self.api_key}"
+        headers = {"Accept": "application/json"}
+        return await http_client.get(url, headers=headers, timeout=self.timeout)
+    
+    async def search_snils(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/quest={query}&token={self.api_key}"
+        headers = {"Accept": "application/json"}
+        return await http_client.get(url, headers=headers, timeout=self.timeout)
+    
+    async def search_fio(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/quest={query}&token={self.api_key}"
+        headers = {"Accept": "application/json"}
+        return await http_client.get(url, headers=headers, timeout=self.timeout)
+    
+    async def search_ogrn(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/quest={query}&token={self.api_key}"
+        headers = {"Accept": "application/json"}
+        return await http_client.get(url, headers=headers, timeout=self.timeout)
+    
+    async def search_company(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/quest={query}&token={self.api_key}"
+        headers = {"Accept": "application/json"}
+        return await http_client.get(url, headers=headers, timeout=self.timeout)
+    
+    async def search_address(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/quest={query}&token={self.api_key}"
+        headers = {"Accept": "application/json"}
+        return await http_client.get(url, headers=headers, timeout=self.timeout)
+    
+    async def search_car(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/quest={query}&token={self.api_key}"
+        headers = {"Accept": "application/json"}
+        return await http_client.get(url, headers=headers, timeout=self.timeout)
+
+class FadeAPIService(SearchService):
+    async def search_phone(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/japi/v2/search"
+        headers = {"access_token": self.api_key, "Content-Type": "application/json"}
+        json_data = {"search_type": "phone", "query": query}
+        return await http_client.post(url, headers=headers, json_data=json_data, timeout=self.timeout)
+    
+    async def search_email(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/japi/v2/search"
+        headers = {"access_token": self.api_key, "Content-Type": "application/json"}
+        json_data = {"search_type": "email", "query": query}
+        return await http_client.post(url, headers=headers, json_data=json_data, timeout=self.timeout)
+    
+    async def search_ip(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/japi/v2/search"
+        headers = {"access_token": self.api_key, "Content-Type": "application/json"}
+        json_data = {"search_type": "ip", "query": query}
+        return await http_client.post(url, headers=headers, json_data=json_data, timeout=self.timeout)
+    
+    async def search_vk(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/japi/v2/search"
+        headers = {"access_token": self.api_key, "Content-Type": "application/json"}
+        json_data = {"search_type": "vk", "query": query}
+        return await http_client.post(url, headers=headers, json_data=json_data, timeout=self.timeout)
+    
+    async def search_inn(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/japi/v2/search"
+        headers = {"access_token": self.api_key, "Content-Type": "application/json"}
+        json_data = {"search_type": "inn", "query": query}
+        return await http_client.post(url, headers=headers, json_data=json_data, timeout=self.timeout)
+    
+    async def search_passport(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/japi/v2/search"
+        headers = {"access_token": self.api_key, "Content-Type": "application/json"}
+        json_data = {"search_type": "passport", "query": query}
+        return await http_client.post(url, headers=headers, json_data=json_data, timeout=self.timeout)
+    
+    async def search_snils(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/japi/v2/search"
+        headers = {"access_token": self.api_key, "Content-Type": "application/json"}
+        json_data = {"search_type": "snils", "query": query}
+        return await http_client.post(url, headers=headers, json_data=json_data, timeout=self.timeout)
+    
+    async def search_fio(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/japi/v2/search"
+        headers = {"access_token": self.api_key, "Content-Type": "application/json"}
+        json_data = {"search_type": "fio", "query": query}
+        return await http_client.post(url, headers=headers, json_data=json_data, timeout=self.timeout)
+    
+    async def search_ogrn(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/japi/v2/search"
+        headers = {"access_token": self.api_key, "Content-Type": "application/json"}
+        json_data = {"search_type": "ogrn", "query": query}
+        return await http_client.post(url, headers=headers, json_data=json_data, timeout=self.timeout)
+    
+    async def search_company(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/japi/v2/search"
+        headers = {"access_token": self.api_key, "Content-Type": "application/json"}
+        json_data = {"search_type": "company", "query": query}
+        return await http_client.post(url, headers=headers, json_data=json_data, timeout=self.timeout)
+    
+    async def search_address(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/japi/v2/search"
+        headers = {"access_token": self.api_key, "Content-Type": "application/json"}
+        json_data = {"search_type": "address", "query": query}
+        return await http_client.post(url, headers=headers, json_data=json_data, timeout=self.timeout)
+    
+    async def search_car(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/japi/v2/search"
+        headers = {"access_token": self.api_key, "Content-Type": "application/json"}
+        json_data = {"search_type": "car", "query": query}
+        return await http_client.post(url, headers=headers, json_data=json_data, timeout=self.timeout)
+
+class ShodanService(SearchService):
+    async def search_ip(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/shodan/host/{query}"
+        params = {"key": self.api_key}
+        return await http_client.get(url, params=params, timeout=self.timeout)
+
+class VKService(SearchService):
+    async def search_vk(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/method/users.get"
+        params = {
+            "user_ids": query,
+            "access_token": self.api_key,
+            "v": "5.131"
+        }
+        return await http_client.get(url, params=params, timeout=self.timeout)
+
+class OFDataService(SearchService):
+    async def search_inn(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/v2/person"
+        params = {"key": self.api_key, "inn": query}
+        return await http_client.get(url, params=params, timeout=self.timeout)
+    
+    async def search_fio(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/v2/search"
+        params = {"key": self.api_key, "fio": query}
+        return await http_client.get(url, params=params, timeout=self.timeout)
+    
+    async def search_ogrn(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/v2/company"
+        params = {"key": self.api_key, "ogrn": query}
+        return await http_client.get(url, params=params, timeout=self.timeout)
+    
+    async def search_company(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/v2/company"
+        params = {"key": self.api_key, "query": query}
+        return await http_client.get(url, params=params, timeout=self.timeout)
+    
+    async def search_address(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/v2/search"
+        params = {"key": self.api_key, "address": query}
+        return await http_client.get(url, params=params, timeout=self.timeout)
+
+search_services: Dict[str, SearchService] = {}
+
+def initialize_services():
+    external_apis = CONFIG["EXTERNAL_APIS"]
+    
+    service_classes = {
+        "snusbase": SnusbaseService,
+        "infinity": InfinityService,
+        "seon": SeonService,
+        "htmlweb": HTMLWebService,
+        "depsearch": DepSearchService,
+        "fadeapi": FadeAPIService,
+        "shodan": ShodanService,
+        "vk": VKService,
+        "ofdata": OFDataService
+    }
+    
+    for service_name, service_config in external_apis.items():
+        if service_name in service_classes:
+            search_services[service_name] = service_classes[service_name](service_name, service_config)
+            logger.info(f"Initialized search service: {service_name}")
+
+initialize_services()
+
+SEARCH_TYPE_MAPPING = {
+    SearchType.PHONE: ["snusbase", "infinity", "seon", "htmlweb", "depsearch", "fadeapi"],
+    SearchType.EMAIL: ["snusbase", "infinity", "depsearch", "fadeapi"],
+    SearchType.IP: ["shodan", "depsearch", "fadeapi"],
+    SearchType.VK: ["vk", "depsearch", "fadeapi"],
+    SearchType.INN: ["ofdata", "infinity", "depsearch", "fadeapi"],
+    SearchType.PASSPORT: ["ofdata", "infinity", "depsearch", "fadeapi"],
+    SearchType.SNILS: ["ofdata", "infinity", "depsearch", "fadeapi"],
+    SearchType.FIO: ["ofdata", "infinity", "depsearch", "fadeapi"],
+    SearchType.OGRN: ["ofdata", "infinity", "depsearch", "fadeapi"],
+    SearchType.COMPANY: ["ofdata", "infinity", "depsearch", "fadeapi"],
+    SearchType.ADDRESS: ["ofdata", "infinity", "depsearch", "fadeapi"],
+    SearchType.CAR: ["ofdata", "infinity", "depsearch", "fadeapi"]
+}
+
+class SearchAggregator:
+    async def search(self, search_type: SearchType, query: str) -> UnifiedResponse:
+        results = []
+        sources = {}
+        
+        service_names = SEARCH_TYPE_MAPPING.get(search_type, [])
+        
+        tasks = []
+        for service_name in service_names:
+            if service_name in search_services:
+                task = self._search_service(service_name, search_type, query)
+                tasks.append(task)
+        
+        if tasks:
+            service_results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            for service_name, result in zip(service_names, service_results):
+                if isinstance(result, Exception):
+                    logger.error(f"Error in service {service_name}: {str(result)}")
+                    sources[service_name] = {
+                        "success": False,
+                        "error": str(result)
+                    }
+                else:
+                    sources[service_name] = {
+                        "success": "error" not in result,
+                        "data": result
+                    }
+                    if "error" not in result and isinstance(result, dict):
+                        results.append(result)
+        
+        return UnifiedResponse(
+            success=len(results) > 0,
+            query_type=search_type.value,
+            query_value=query,
+            results=results,
+            sources=sources,
+            timestamp=datetime.utcnow().isoformat()
+        )
+    
+    async def _search_service(self, service_name: str, search_type: SearchType, query: str) -> Dict[str, Any]:
+        service = search_services.get(service_name)
+        if not service:
+            return {"error": "service_not_found", "message": f"Service {service_name} not found"}
+        
+        method_map = {
+            SearchType.PHONE: service.search_phone,
+            SearchType.EMAIL: service.search_email,
+            SearchType.IP: service.search_ip,
+            SearchType.VK: service.search_vk,
+            SearchType.INN: service.search_inn,
+            SearchType.PASSPORT: service.search_passport,
+            SearchType.SNILS: service.search_snils,
+            SearchType.FIO: service.search_fio,
+            SearchType.OGRN: service.search_ogrn,
+            SearchType.COMPANY: service.search_company,
+            SearchType.ADDRESS: service.search_address,
+            SearchType.CAR: service.search_car
+        }
+        
+        method = method_map.get(search_type)
+        if method:
+            return await method(query)
+        else:
+            return {"error": "not_supported", "message": f"Search type {search_type.value} not supported by {service_name}"}
+
+search_aggregator = SearchAggregator()
+
+app = FastAPI(
+    title="Search API Aggregator",
+    description="Unified API for searching across multiple open-source search services",
+    version="1.0.0"
+)
+
+@app.on_event("startup")
+async def startup_event():
+    logger.info("Starting Search API Aggregator...")
+    logger.info(f"Master API Key: {CONFIG['MASTER_API_KEY'][:10]}...")
+    logger.info(f"Configured services: {list(search_services.keys())}")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    await http_client.close()
+    logger.info("HTTP client closed")
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start_time = time.time()
+    
+    logger.info(f"Request: {request.method} {request.url}")
+    
+    response = await call_next(request)
+    
+    process_time = time.time() - start_time
+    logger.info(f"Response: {response.status_code} - {process_time:.3f}s")
+    
+    return response
+
+@app.get("/search", response_model=UnifiedResponse)
+async def search(
+    request: Request,
+    phone: Optional[str] = Query(None, description="Phone number"),
+    email: Optional[str] = Query(None, description="Email address"),
+    ip: Optional[str] = Query(None, description="IP address"),
+    vk: Optional[str] = Query(None, description="VK ID"),
+    inn: Optional[str] = Query(None, description="INN"),
+    passport: Optional[str] = Query(None, description="Passport number"),
+    snils: Optional[str] = Query(None, description="SNILS"),
+    fio: Optional[str] = Query(None, description="Full name"),
+    ogrn: Optional[str] = Query(None, description="OGRN"),
+    company: Optional[str] = Query(None, description="Company name"),
+    address: Optional[str] = Query(None, description="Address"),
+    car: Optional[str] = Query(None, description="Car license plate"),
+    api: str = Query(..., description="API key")
+):
+    if not api_key_manager.is_valid_key(api):
+        logger.warning(f"Invalid API key used: {api[:10]}...")
+        raise HTTPException(status_code=401, detail="Invalid or inactive API key")
+    
+    if not api_key_manager.check_rate_limit(api):
+        logger.warning(f"Rate limit exceeded for key: {api[:10]}...")
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    
+    search_params = {
+        "phone": phone,
+        "email": email,
+        "ip": ip,
+        "vk": vk,
+        "inn": inn,
+        "passport": passport,
+        "snils": snils,
+        "fio": fio,
+        "ogrn": ogrn,
+        "company": company,
+        "address": address,
+        "car": car
+    }
+    
+    provided_params = {k: v for k, v in search_params.items() if v is not None}
+    
+    if len(provided_params) == 0:
+        raise HTTPException(status_code=400, detail="At least one search parameter must be provided")
+    
+    if len(provided_params) > 1:
+        raise HTTPException(status_code=400, detail="Only one search parameter can be used per request")
+    
+    param_name, query_value = next(iter(provided_params.items()))
+    search_type = SearchType(param_name)
+    
+    api_key_manager.record_request(api)
+    
+    logger.info(f"Search request: {search_type.value}={query_value} from key {api[:10]}...")
+    
+    result = await search_aggregator.search(search_type, query_value)
+    
+    return result
+
+def verify_master_key(api_key: str) -> bool:
+    return api_key_manager.is_master_key(api_key)
+
+@app.post("/master/keys")
+async def create_key(
+    request: CreateKeyRequest,
+    x_api_key: str = Header(..., description="Master API key")
+):
+    if not verify_master_key(x_api_key):
+        raise HTTPException(status_code=403, detail="Master API key required")
+    
+    new_key = api_key_manager.create_key(
+        rate_limit=request.rate_limit,
+        rate_limit_period=request.rate_limit_period
+    )
+    
+    logger.info(f"New API key created by master: {new_key}")
+    
+    return {"key": new_key, "message": "API key created successfully"}
+
+@app.delete("/master/keys/{key}")
+async def delete_key(
+    key: str,
+    x_api_key: str = Header(..., description="Master API key")
+):
+    if not verify_master_key(x_api_key):
+        raise HTTPException(status_code=403, detail="Master API key required")
+    
+    if api_key_manager.delete_key(key):
+        logger.info(f"API key deleted by master: {key}")
+        return {"message": "API key deleted successfully"}
+    else:
+        raise HTTPException(status_code=404, detail="API key not found or cannot be deleted")
+
+@app.put("/master/keys/{key}/disable")
+async def disable_key(
+    key: str,
+    x_api_key: str = Header(..., description="Master API key")
+):
+    if not verify_master_key(x_api_key):
+        raise HTTPException(status_code=403, detail="Master API key required")
+    
+    if api_key_manager.disable_key(key):
+        logger.info(f"API key disabled by master: {key}")
+        return {"message": "API key disabled successfully"}
+    else:
+        raise HTTPException(status_code=404, detail="API key not found")
+
+@app.put("/master/keys/{key}/enable")
+async def enable_key(
+    key: str,
+    x_api_key: str = Header(..., description="Master API key")
+):
+    if not verify_master_key(x_api_key):
+        raise HTTPException(status_code=403, detail="Master API key required")
+    
+    if api_key_manager.enable_key(key):
+        logger.info(f"API key enabled by master: {key}")
+        return {"message": "API key enabled successfully"}
+    else:
+        raise HTTPException(status_code=404, detail="API key not found")
+
+@app.get("/master/keys")
+async def list_keys(
+    x_api_key: str = Header(..., description="Master API key")
+):
+    if not verify_master_key(x_api_key):
+        raise HTTPException(status_code=403, detail="Master API key required")
+    
+    keys = api_key_manager.get_all_keys()
+    
+    return {"keys": keys}
+
+@app.get("/master/keys/{key}/stats")
+async def get_key_stats(
+    key: str,
+    x_api_key: str = Header(..., description="Master API key")
+):
+    if not verify_master_key(x_api_key):
+        raise HTTPException(status_code=403, detail="Master API key required")
+    
+    stats = api_key_manager.get_key_stats(key)
+    
+    if stats:
+        return stats
+    else:
+        raise HTTPException(status_code=404, detail="API key not found")
+
+@app.get("/health")
+async def health_check():
+    return {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "services": list(search_services.keys())
+    }
+
+def main():
+    uvicorn.run(
+        app,
+        host=CONFIG["HOST"],
+        port=CONFIG["PORT"],
+        log_level=CONFIG["LOG_LEVEL"].lower()
     )
 
-def load_keys():
-    global ALLOWED_KEYS
-    default_keys = {"hdhxhs827dhsb": {"expires_at": None}}
-    if not os.path.exists(KEYS_FILE):
-        try:
-            with open(KEYS_FILE, 'w', encoding='utf-8') as f:
-                json.dump(default_keys, f, indent=2, ensure_ascii=False)
-        except:
-            pass
-        return default_keys
-    try:
-        with open(KEYS_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            if isinstance(data, list):
-                migrated = {k: {"expires_at": None} for k in data}
-                with open(KEYS_FILE, 'w', encoding='utf-8') as wf:
-                    json.dump(migrated, wf, indent=2, ensure_ascii=False)
-                return migrated
-            return data
-    except:
-        return default_keys
-
-ALLOWED_KEYS = load_keys()
-
-def save_keys_to_file():
-    try:
-        with open(KEYS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(ALLOWED_KEYS, f, indent=2, ensure_ascii=False)
-    except:
-        pass
-
-def write_to_log(message):
-    print(message)
-    try:
-        with open(LOG_FILE, 'a', encoding='utf-8') as f:
-            f.write(f"{message}\n")
-    except Exception as e:
-        print(f"[ERROR LOGGING] {e}")
-
-def generate_random_key(length=24):
-    alphabet = string.ascii_letters + string.digits
-    return ''.join(secrets.choice(alphabet) for _ in range(length))
-
-def parse_duration(duration_str):
-    if not duration_str:
-        return None
-    match = re.match(r'^(\d+)\s*(day|days|hour|hours|min|mins|minute|minutes)$', str(duration_str).strip().lower())
-    if not match:
-        return None
-    amount = int(match.group(1))
-    unit = match.group(2)
-    if 'day' in unit:
-        return timedelta(days=amount)
-    elif 'hour' in unit:
-        return timedelta(hours=amount)
-    elif 'min' in unit:
-        return timedelta(minutes=amount)
-    return None
-
-def get_real_ip(request: Request):
-    forwarded = request.headers.get('X-Forwarded-For')
-    if forwarded:
-        return forwarded.split(',')[0].strip()
-    return request.client.host if request.client else "127.0.0.1"
-
-def is_ip_banned(ip):
-    if ip in banned_ips:
-        if datetime.now() < banned_ips[ip]:
-            return True
-        else:
-            del banned_ips[ip]
-    return False
-
-def ban_ip(ip, days=30):
-    banned_ips[ip] = datetime.now() + timedelta(days=days)
-
-def check_auth(request: Request):
-    ip = get_real_ip(request)
-    auth_key = request.headers.get("X-API-Key") or request.query_params.get("api_key")
-    
-    if is_ip_banned(ip):
-        return False
-    
-    if ip in failed_attempts and failed_attempts[ip] >= 15:
-        ban_ip(ip, 30)
-        return False
-    
-    if not auth_key:
-        failed_attempts[ip] = failed_attempts.get(ip, 0) + 1
-        return False
-    
-    if auth_key == MASTER_KEY:
-        failed_attempts[ip] = 0
-        return True
-    
-    if auth_key in ALLOWED_KEYS:
-        expires_at_str = ALLOWED_KEYS[auth_key].get("expires_at")
-        if expires_at_str:
-            expires_at = datetime.strptime(expires_at_str, "%Y-%m-%d %H:%M:%S")
-            if datetime.now() > expires_at:
-                write_to_log(f"[EXPIRED LOG] [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Ключ '{auth_key}' заблокирован ({expires_at_str}).")
-                return False
-        failed_attempts[ip] = 0
-        return True
-    
-    failed_attempts[ip] = failed_attempts.get(ip, 0) + 1
-    return False
-
-def sanitize_query(query):
-    if not query:
-        return query
-    return re.sub(r'[^a-zA-Z0-9\s@\.\-_+:яёА-ЯЁ]', '', query)
-
-SUPPORTED_PARAMS = [
-    'pass', 'email', 'inn', 'text', 'фио', 'fio', 'phone', 
-    'vkid', 'vk', 'ip', 'snils', 'passport', 'ogrn', 'company',
-    'nick', 'telegram', 'vin'
-]
-
-def detect_type(query):
-    q = str(query).strip()
-    q_lower = q.lower()
-    
-    if q_lower.startswith('pass:'):
-        return "pass"
-    if q_lower.startswith('inn') or (re.match(r'^\d{10}$|^\d{12}$', re.sub(r'[^\d]', '', q)) and len(re.sub(r'[^\d]', '', q)) in [10, 12]):
-        return "inn"
-    if re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', q):
-        return "email"
-    if re.match(r'^\+?\d{10,15}$', re.sub(r'[^\d+]', '', q)):
-        return "phone"
-    if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', q):
-        return "ip"
-    if re.match(r'^[0-9]{4}\s?[0-9]{6}$', q) or re.match(r'^[А-Я]{2}\s?[0-9]{7}$', q):
-        return "passport"
-    if re.match(r'^[0-9]{3}-?[0-9]{3}-?[0-9]{3}-?[0-9]{2}$', q):
-        return "snils"
-    if re.match(r'^\d{13}$', q):
-        return "ogrn"
-    if re.match(r'^[A-HJ-NPR-Z0-9]{17}$', q.upper()):
-        return "vin"
-    if q.startswith('@'):
-        return "telegram"
-    if re.match(r'^[А-ЯЁA-Z][а-яёa-zА-ЯЁA-Z0-9\s\-\.\,]+$', q) and len(q) > 3:
-        return "company"
-    return "text"
-
-# --- Workers ---
-
-def reason_search(query, search_type):
-    try:
-        type_mapping = {
-            "phone": "phone", "email": "email", "inn": "inn", "ip": "ip",
-            "passport": "passport", "fio": "fio", "фио": "fio", "vk": "vk",
-            "vkid": "vk", "nick": "nick", "telegram": "telegram", "vin": "vin", "text": "fio"
-        }
-        api_type = type_mapping.get(search_type, "fio")
-        
-        # Если это номер телефона, гарантируем очистку от лишних символов перед отправкой
-        clean_query = str(query).strip()
-        if api_type == "phone":
-            clean_query = re.sub(r'[^\d]', '', clean_query)
-
-        headers = {
-            "access_token": REASON_KEY, 
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "search_type": api_type, 
-            "query": clean_query
-        }
-        
-        r = requests.post(REASON_URL, headers=headers, json=payload, timeout=10)
-        if r.status_code == 200:
-            return {"source": "ReasonAPI", "data": r.json()}
-        return {"source": "ReasonAPI", "error": r.status_code}
-    except Exception as e:
-        return {"source": "ReasonAPI", "error": 504}
-
-def snusbase(query, search_type):
-    try:
-        headers = {"Content-Type": "application/json"}
-        snus_type = "password" if search_type == "pass" else "email"
-        payload = {"terms": [str(query).strip()], "types": [snus_type], "wildcard": False}
-        for key in SNUSBASE_KEYS:
-            try:
-                headers["Auth"] = key
-                r = requests.post(SNUSBASE_URL, headers=headers, json=payload, timeout=8)
-                if r.status_code == 200:
-                    return {"source": "Snusbase", "data": r.json()}
-                if r.status_code in [402, 429]:
-                    continue
-                return {"source": "Snusbase", "error": r.status_code}
-            except:
-                continue
-        return {"source": "Snusbase", "error": "All keys exhausted"}
-    except:
-        return {"source": "Snusbase", "error": 504}
-
-def ofdata_inn_only(query):
-    """Опрашивает Ofdata исключительно по ИНН"""
-    q = str(query).strip()
-    headers = {"User-Agent": "Mozilla/5.0"}
-    collected_data = {}
-    
-    params = {"key": OFDATA_KEY, "inn": q}
-    url = f"{OFDATA_BASE}/person"
-    try:
-        r = requests.get(url, headers=headers, params=params, timeout=8)
-        if r.status_code == 200:
-            collected_data["result"] = r.json()
-            return {"source": "Ofdata", "data": collected_data}
-        return {"source": "Ofdata", "error": r.status_code}
-    except:
-        return {"source": "Ofdata", "error": 504}
-
-def infinity_check(query, search_type):
-    try:
-        session = requests.Session()
-        from requests.adapters import HTTPAdapter
-        from urllib3.util import Retry
-        retries = Retry(total=2, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
-        session.mount('https://', HTTPAdapter(max_retries=retries))
-        
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "application/json, text/plain, */*", "Connection": "keep-alive"
-        }
-        
-        q = str(query).strip()
-        param_name = None
-        if search_type == "phone":
-            param_name = "phone"
-            q = re.sub(r'[^\d]', '', q)  # Очистка номера для Infinity
-        elif search_type == "email":
-            param_name = "email"
-        elif search_type in ["text", "фио", "fio", "company"]:
-            param_name = "fio"
-            
-        if not param_name:
-            return None
-
-        params = {param_name: q, "token": INFINITY_KEY}
-        r = session.get(INFINITY_URL, headers=headers, params=params, timeout=(3, 8))
-        if r.status_code == 200:
-            try:
-                res_data = r.json()
-            except:
-                try:
-                    res_data = json.loads(r.text)
-                except:
-                    res_data = r.text
-            return {"source": "InfinityCheck", "data": res_data}
-        return {"source": "InfinityCheck", "error": r.status_code}
-    except:
-        return {"source": "InfinityCheck", "error": 504}
-
-def lookup_phone_via_seon(query):
-    try:
-        clean_phone = re.sub(r'[^\d]', '', str(query).strip())
-        headers = {"X-API-KEY": SEON_KEY, "Content-Type": "application/json"}
-        payload = {"phone": clean_phone}
-        r = requests.post(SEON_URL, headers=headers, json=payload, timeout=8)
-        if r.status_code == 200:
-            return {"source": "SEON", "data": r.json()}
-        return {"source": "SEON", "error": r.status_code}
-    except:
-        return {"source": "SEON", "error": 504}
-
-def lookup_vk(query):
-    try:
-        url = "https://api.vk.com/method/users.get"
-        params = {
-            "user_ids": str(query).strip(), "access_token": VK_TOKEN,
-            "v": "5.199", "fields": "first_name,last_name,bdate,city,country,contacts,online"
-        }
-        r = requests.get(url, params=params, timeout=8)
-        if r.status_code == 200:
-            return {"source": "VK", "data": r.json()}
-        return {"source": "VK", "error": r.status_code}
-    except:
-        return {"source": "VK", "error": 504}
-
-def lookup_shodan(query):
-    try:
-        ip = str(query).strip()
-        url = f"{SHODAN_BASE_URL}/shodan/host/{ip}"
-        params = {"key": SHODAN_KEY}
-        r = requests.get(url, params=params, timeout=8)
-        if r.status_code == 403:
-            fallback_url = f"https://internetdb.shodan.io/{ip}"
-            r_fallback = requests.get(fallback_url, timeout=8)
-            if r_fallback.status_code == 200:
-                return {"source": "Shodan (InternetDB Fallback)", "data": r_fallback.json()}
-            return {"source": "Shodan", "error": r_fallback.status_code}
-        if r.status_code == 200:
-            return {"source": "Shodan", "data": r.json()}
-        return {"source": "Shodan", "error": r.status_code}
-    except:
-        return {"source": "Shodan", "error": 504}
-
-# --- Routes ---
-
-@app.api_route("/search", methods=["GET", "POST"])
-async def search(request: Request):
-    try:
-        if not check_auth(request):
-            ip = get_real_ip(request)
-            if is_ip_banned(ip):
-                return render_json({"error": "Your IP is banned for 30 days."}, 403)
-            return render_json({"error": "Unauthorized."}, 401)
-
-        query = None
-        search_type = None
-
-        if request.method == "POST":
-            try:
-                data = await request.json()
-            except:
-                data = {}
-            for param in SUPPORTED_PARAMS:
-                if param in data:
-                    query = data[param]
-                    search_type = param
-                    break
-            if not query:
-                query = data.get('query') or data.get('search')
-        else:
-            for param in SUPPORTED_PARAMS:
-                val = request.query_params.get(param)
-                if val:
-                    query = val
-                    search_type = param
-                    break
-            if not query:
-                query = request.query_params.get('query') or request.query_params.get('search')
-        
-        if not query:
-            return render_json({"error": "Missing search term"}, 400)
-        
-        query = sanitize_query(query)
-        if not search_type:
-            search_type = detect_type(query)
-        
-        # Общая нормализация запроса для типов телефонных номеров
-        if search_type == "phone":
-            query = re.sub(r'[^\d]', '', str(query).strip())
-
-        result = {"query": query, "type": search_type, "found": False, "data": None}
-        
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = {}
-            if search_type in ["phone", "email", "inn", "ip", "passport", "fio", "фио", "vk", "vkid", "nick", "telegram", "vin", "text"]:
-                futures[executor.submit(reason_search, query, search_type)] = "reason"
-            if search_type in ["email", "pass"]:
-                futures[executor.submit(snusbase, query, search_type)] = "sn"
-            if search_type == "inn":
-                futures[executor.submit(ofdata_inn_only, query)] = "of"
-            if search_type in ["phone", "email", "text", "фио", "fio", "company"]:
-                futures[executor.submit(infinity_check, query, search_type)] = "inf"
-            if search_type == "phone":
-                futures[executor.submit(lookup_phone_via_seon, query)] = "seon"
-            if search_type in ["vkid", "vk"]:
-                futures[executor.submit(lookup_vk, query)] = "vk"
-            if search_type == "ip":
-                futures[executor.submit(lookup_shodan, query)] = "shodan"
-                
-            all_data = {}
-            for future in as_completed(futures):
-                res = future.result()
-                if res and "data" in res:
-                    source_name = res.get("source", "Unknown")
-                    raw_data = res["data"]
-                    if isinstance(raw_data, str):
-                        try:
-                            raw_data = json.loads(raw_data)
-                        except:
-                            pass
-                    all_data[source_name] = raw_data
-            
-            if all_data:
-                result["found"] = True
-                result["data"] = all_data
-        
-        return render_json(result)
-    except Exception as e:
-        return render_json({"error": "Internal server error", "details": str(e)}, 500)
-
-@app.api_route("/key/create", methods=["POST", "GET"])
-async def create_key(request: Request):
-    try:
-        master = request.headers.get("X-Master-Key") or request.query_params.get("master_key")
-        if request.method == "POST":
-            try:
-                data = await request.json()
-            except:
-                data = {}
-            if not master:
-                master = data.get("master_key")
-        
-        if master != MASTER_KEY:
-            return render_json({"error": "Unauthorized."}, 401)
-        
-        new_key = request.query_params.get("new_key")
-        duration_param = request.query_params.get("duration")
-        if request.method == "POST":
-            try:
-                data = await request.json()
-            except:
-                data = {}
-            if not new_key:
-                new_key = data.get("new_key")
-            if not duration_param:
-                duration_param = data.get("duration")
-        
-        global ALLOWED_KEYS
-        if not new_key:
-            while True:
-                new_key = generate_random_key(24)
-                if new_key not in ALLOWED_KEYS:
-                    break
-        else:
-            if new_key in ALLOWED_KEYS:
-                return render_json({"error": "Already exists."}, 400)
-        
-        expires_at_str = None
-        if duration_param:
-            time_delta = parse_duration(duration_param)
-            if time_delta:
-                expire_datetime = datetime.now() + time_delta
-                expires_at_str = expire_datetime.strftime("%Y-%m-%d %H:%M:%S")
-            else:
-                return render_json({"error": "Invalid duration format."}, 400)
-        
-        ALLOWED_KEYS[new_key] = {"expires_at": expires_at_str}
-        save_keys_to_file()
-        
-        log_msg = f"[CREATE LOG] [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Ключ: '{new_key}' | Истекает: {expires_at_str if expires_at_str else 'Permanent'}"
-        write_to_log(log_msg)
-        
-        return render_json({"success": True, "key": new_key, "expires_at": expires_at_str if expires_at_str else "Permanent"})
-    except Exception as e:
-        return render_json({"error": str(e)}, 500)
-
-@app.api_route("/key/delete", methods=["POST", "GET"])
-async def delete_key(request: Request):
-    try:
-        master = request.headers.get("X-Master-Key") or request.query_params.get("master_key")
-        if request.method == "POST":
-            try:
-                data = await request.json()
-            except:
-                data = {}
-            if not master:
-                master = data.get("master_key")
-        
-        if master != MASTER_KEY:
-            return render_json({"error": "Unauthorized."}, 401)
-        
-        target_key = request.query_params.get("target_key")
-        if request.method == "POST":
-            try:
-                data = await request.json()
-            except:
-                data = {}
-            if not target_key:
-                target_key = data.get("target_key")
-        
-        if not target_key:
-            return render_json({"error": "Missing parameter."}, 400)
-        
-        global ALLOWED_KEYS
-        if target_key not in ALLOWED_KEYS:
-            return render_json({"error": "Not found."}, 404)
-        
-        del ALLOWED_KEYS[target_key]
-        save_keys_to_file()
-        
-        log_msg = f"[DELETE LOG] [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Удален ключ: '{target_key}'"
-        write_to_log(log_msg)
-        
-        return render_json({"success": True, "message": "Removed."})
-    except Exception as e:
-        return render_json({"error": str(e)}, 500)
-
-@app.get("/key/list")
-async def list_keys(request: Request):
-    try:
-        master = request.headers.get("X-Master-Key") or request.query_params.get("master_key")
-        if master != MASTER_KEY:
-                        return render_json({"error": "Unauthorized."}, 401)
-        return render_json({"allowed_api_keys": ALLOWED_KEYS})
-    except Exception as e:
-        return render_json({"error": str(e)}, 500)
-
-@app.get("/")
-async def home():
-    return render_json({"name": "EasyApi", "author": "@y3Huk_iphone"})
-
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    uvicorn.run(app, host="0.0.0.0", port=port, workers=1)
+    main()
 
 

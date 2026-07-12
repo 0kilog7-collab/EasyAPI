@@ -5,16 +5,15 @@ import json
 import logging
 import time
 import uuid
-from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set
-from dataclasses import dataclass, asdict
+from typing import Any, Dict, List, Optional
+from dataclasses import dataclass
 from enum import Enum
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Header, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field
 import httpx
 
 CONFIG = {
@@ -24,12 +23,13 @@ CONFIG = {
     "EXTERNAL_APIS": {
         "snusbase": {
             "api_key": "sb5029dec66mht55m78fx8bsw6tm8a",
+            "backup_key": "sbmeovhou6ecsn9fd9wcwnwwvsvwnc",
             "base_url": "https://api.snusbase.com",
             "timeout": 30
         },
-        "infinity": {
-            "api_key": "N7xQ4Lp2ZWk8F5VcD1mR9H6TyU3E0BJa",
-            "base_url": "https://infinity-search.fun",
+        "depsearch": {
+            "api_key": "w8wxpMncT84SyYSDobV6zSFdZGqcnAoJ",
+            "base_url": "https://api.depsearch.sbs",
             "timeout": 30
         },
         "seon": {
@@ -40,16 +40,6 @@ CONFIG = {
         "htmlweb": {
             "api_key": "",
             "base_url": "https://htmlweb.ru",
-            "timeout": 30
-        },
-        "depsearch": {
-            "api_key": "WDTHx2vqZGE38gchBe7oAewzB9ZPNpxU",
-            "base_url": "https://api.depsearch.sbs",
-            "timeout": 30
-        },
-        "fadeapi": {
-            "api_key": "jupit-54cb687d48b31e8234d6ab7f4f",
-            "base_url": "https://graph.maybebot.icu",
             "timeout": 30
         },
         "shodan": {
@@ -66,6 +56,16 @@ CONFIG = {
             "api_key": "DiC9ALodH5T12BfR",
             "base_url": "https://api.ofdata.ru",
             "timeout": 30
+        },
+        "cryven": {
+            "api_key": "%40Oliver_FloresSS%3ARRCqVLUb",
+            "base_url": "https://cryven.info",
+            "timeout": 30
+        },
+        "bigbase": {
+            "api_key": "hEtcNRmBOGUxGwHX9NfOccaIXbyqCmRF",
+            "base_url": "https://bigbase.top/api",
+            "timeout": 30
         }
     },
     "DEFAULT_RATE_LIMIT": 1000,
@@ -74,18 +74,8 @@ CONFIG = {
     "LOG_FILE": "search_aggregator.log"
 }
 
-def setup_logging():
-    logging.basicConfig(
-        level=getattr(logging, CONFIG["LOG_LEVEL"]),
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(CONFIG["LOG_FILE"]),
-            logging.StreamHandler()
-        ]
-    )
-    return logging.getLogger(__name__)
-
-logger = setup_logging()
+logging.basicConfig(level=getattr(logging, CONFIG["LOG_LEVEL"]))
+logger = logging.getLogger(__name__)
 
 class SearchType(Enum):
     PHONE = "phone"
@@ -114,42 +104,11 @@ class APIKeyInfo:
     rate_limit_period: int
     request_count: int
     last_used: Optional[str] = None
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "key": self.key,
-            "status": self.status.value,
-            "created_at": self.created_at,
-            "rate_limit": self.rate_limit,
-            "rate_limit_period": self.rate_limit_period,
-            "request_count": self.request_count,
-            "last_used": self.last_used
-        }
-
-class UnifiedResponse(BaseModel):
-    success: bool
-    query_type: str
-    query_value: str
-    results: List[Dict[str, Any]]
-    sources: Dict[str, Any]
-    timestamp: str
-    error: Optional[str] = None
-
-class CreateKeyRequest(BaseModel):
-    rate_limit: Optional[int] = Field(default=CONFIG["DEFAULT_RATE_LIMIT"])
-    rate_limit_period: Optional[int] = Field(default=CONFIG["DEFAULT_RATE_LIMIT_PERIOD"])
-
-class UpdateKeyRequest(BaseModel):
-    rate_limit: Optional[int] = None
-    rate_limit_period: Optional[int] = None
 
 class APIKeyManager:
     def __init__(self):
         self.keys: Dict[str, APIKeyInfo] = {}
         self.master_key = CONFIG["MASTER_API_KEY"]
-        self._initialize_master_key()
-    
-    def _initialize_master_key(self):
         master_info = APIKeyInfo(
             key=self.master_key,
             status=APIKeyStatus.ACTIVE,
@@ -169,10 +128,9 @@ class APIKeyManager:
             return False
         return self.keys[key].status == APIKeyStatus.ACTIVE
     
-    def create_key(self, rate_limit: int = CONFIG["DEFAULT_RATE_LIMIT"],
-                   rate_limit_period: int = CONFIG["DEFAULT_RATE_LIMIT_PERIOD"]) -> str:
+    def create_key(self, rate_limit: int = 1000, rate_limit_period: int = 3600) -> str:
         new_key = f"sk_{uuid.uuid4().hex}"
-        key_info = APIKeyInfo(
+        self.keys[new_key] = APIKeyInfo(
             key=new_key,
             status=APIKeyStatus.ACTIVE,
             created_at=datetime.utcnow().isoformat(),
@@ -180,64 +138,18 @@ class APIKeyManager:
             rate_limit_period=rate_limit_period,
             request_count=0
         )
-        self.keys[new_key] = key_info
-        logger.info(f"Created new API key: {new_key}")
         return new_key
     
     def delete_key(self, key: str) -> bool:
         if key == self.master_key:
-            logger.warning("Attempted to delete master key")
             return False
         if key in self.keys:
             del self.keys[key]
-            logger.info(f"Deleted API key: {key}")
             return True
         return False
     
-    def disable_key(self, key: str) -> bool:
-        if key == self.master_key:
-            logger.warning("Attempted to disable master key")
-            return False
-        if key in self.keys:
-            self.keys[key].status = APIKeyStatus.DISABLED
-            logger.info(f"Disabled API key: {key}")
-            return True
-        return False
-    
-    def enable_key(self, key: str) -> bool:
-        if key in self.keys:
-            self.keys[key].status = APIKeyStatus.ACTIVE
-            logger.info(f"Enabled API key: {key}")
-            return True
-        return False
-    
-    def get_all_keys(self) -> List[Dict[str, Any]]:
-        return [key_info.to_dict() for key_info in self.keys.values()]
-    
-    def get_key_stats(self, key: str) -> Optional[Dict[str, Any]]:
-        if key in self.keys:
-            return self.keys[key].to_dict()
-        return None
-    
-    def check_rate_limit(self, key: str) -> bool:
-        if key not in self.keys:
-            return False
-        
-        key_info = self.keys[key]
-        
-        if key_info.rate_limit == -1:
-            return True
-        
-        if key_info.request_count >= key_info.rate_limit:
-            logger.warning(f"Rate limit exceeded for key: {key}")
-            return False
-        
-        return True
-    
-    def record_request(self, key: str):
-        if key in self.keys:
-            self.keys[key].request_count += 1
-            self.keys[key].last_used = datetime.utcnow().isoformat()
+    def get_all_keys(self):
+        return [k.to_dict() for k in self.keys.values()]
 
 api_key_manager = APIKeyManager()
 
@@ -245,662 +157,272 @@ class HTTPClient:
     def __init__(self):
         self.client = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
     
-    async def close(self):
-        await self.client.aclose()
-    
-    async def get(self, url: str, headers: Optional[Dict[str, str]] = None,
-                  params: Optional[Dict[str, Any]] = None,
-                  timeout: int = 30) -> Dict[str, Any]:
+    async def get(self, url, headers=None, params=None, timeout=30):
         try:
-            response = await self.client.get(
-                url,
-                headers=headers,
-                params=params,
-                timeout=timeout
-            )
-            response.raise_for_status()
-            return response.json()
-        except httpx.TimeoutException:
-            logger.error(f"Timeout error for URL: {url}")
-            return {"error": "timeout", "message": "Request timed out"}
-        except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error for URL {url}: {e.response.status_code}")
-            return {"error": "http_error", "status_code": e.response.status_code, "message": str(e)}
-        except httpx.RequestError as e:
-            logger.error(f"Request error for URL {url}: {str(e)}")
-            return {"error": "request_error", "message": str(e)}
-        except json.JSONDecodeError:
-            logger.error(f"JSON decode error for URL: {url}")
-            return {"error": "json_error", "message": "Invalid JSON response"}
+            r = await self.client.get(url, headers=headers, params=params, timeout=timeout)
+            return r.json()
         except Exception as e:
-            logger.error(f"Unexpected error for URL {url}: {str(e)}")
-            return {"error": "unexpected_error", "message": str(e)}
+            return {"error": str(e)}
     
-    async def post(self, url: str, headers: Optional[Dict[str, str]] = None,
-                   json_data: Optional[Dict[str, Any]] = None,
-                   timeout: int = 30) -> Dict[str, Any]:
+    async def post(self, url, headers=None, json_data=None, timeout=30):
         try:
-            response = await self.client.post(
-                url,
-                headers=headers,
-                json=json_data,
-                timeout=timeout
-            )
-            response.raise_for_status()
-            return response.json()
-        except httpx.TimeoutException:
-            logger.error(f"Timeout error for URL: {url}")
-            return {"error": "timeout", "message": "Request timed out"}
-        except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error for URL {url}: {e.response.status_code}")
-            return {"error": "http_error", "status_code": e.response.status_code, "message": str(e)}
-        except httpx.RequestError as e:
-            logger.error(f"Request error for URL {url}: {str(e)}")
-            return {"error": "request_error", "message": str(e)}
-        except json.JSONDecodeError:
-            logger.error(f"JSON decode error for URL: {url}")
-            return {"error": "json_error", "message": "Invalid JSON response"}
+            r = await self.client.post(url, headers=headers, json=json_data, timeout=timeout)
+            return r.json()
         except Exception as e:
-            logger.error(f"Unexpected error for URL {url}: {str(e)}")
-            return {"error": "unexpected_error", "message": str(e)}
+            return {"error": str(e)}
 
 http_client = HTTPClient()
 
 class SearchService:
-    def __init__(self, service_name: str, config: Dict[str, Any]):
-        self.service_name = service_name
+    def __init__(self, name: str, config: dict):
+        self.name = name
+        self.config = config
         self.api_key = config.get("api_key", "")
         self.base_url = config.get("base_url", "")
         self.timeout = config.get("timeout", 30)
-    
-    async def search_phone(self, query: str) -> Dict[str, Any]:
-        return {"error": "not_supported", "message": "Phone search not supported"}
-    
-    async def search_email(self, query: str) -> Dict[str, Any]:
-        return {"error": "not_supported", "message": "Email search not supported"}
-    
-    async def search_ip(self, query: str) -> Dict[str, Any]:
-        return {"error": "not_supported", "message": "IP search not supported"}
-    
-    async def search_vk(self, query: str) -> Dict[str, Any]:
-        return {"error": "not_supported", "message": "VK search not supported"}
-    
-    async def search_inn(self, query: str) -> Dict[str, Any]:
-        return {"error": "not_supported", "message": "INN search not supported"}
-    
-    async def search_passport(self, query: str) -> Dict[str, Any]:
-        return {"error": "not_supported", "message": "Passport search not supported"}
-    
-    async def search_snils(self, query: str) -> Dict[str, Any]:
-        return {"error": "not_supported", "message": "SNILS search not supported"}
-    
-    async def search_fio(self, query: str) -> Dict[str, Any]:
-        return {"error": "not_supported", "message": "FIO search not supported"}
-    
-    async def search_ogrn(self, query: str) -> Dict[str, Any]:
-        return {"error": "not_supported", "message": "OGRN search not supported"}
-    
-    async def search_company(self, query: str) -> Dict[str, Any]:
-        return {"error": "not_supported", "message": "Company search not supported"}
-    
-    async def search_address(self, query: str) -> Dict[str, Any]:
-        return {"error": "not_supported", "message": "Address search not supported"}
-    
-    async def search_car(self, query: str) -> Dict[str, Any]:
-        return {"error": "not_supported", "message": "Car search not supported"}
 
 class SnusbaseService(SearchService):
     async def search_phone(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/search/phone"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
-        params = {"query": query}
-        return await http_client.get(url, headers=headers, params=params, timeout=self.timeout)
+        url = f"{self.base_url}/data/search"
+        for key in [self.api_key, self.config.get("backup_key")]:
+            try:
+                headers = {"Content-Type": "application/json", "Auth": key}
+                payload = {"terms": [query], "types": ["email"], "wildcard": False}
+                result = await http_client.post(url, headers=headers, json_data=payload, timeout=self.timeout)
+                if "error" not in result:
+                    return result
+            except:
+                continue
+        return {"error": "All Snusbase keys failed"}
     
     async def search_email(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/search/email"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
-        params = {"query": query}
-        return await http_client.get(url, headers=headers, params=params, timeout=self.timeout)
-
-class InfinityService(SearchService):
-    async def search_phone(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/v1/phone"
-        headers = {"X-API-Key": self.api_key}
-        params = {"phone": query}
-        return await http_client.get(url, headers=headers, params=params, timeout=self.timeout)
-    
-    async def search_email(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/v1/email"
-        headers = {"X-API-Key": self.api_key}
-        params = {"email": query}
-        return await http_client.get(url, headers=headers, params=params, timeout=self.timeout)
-    
-    async def search_inn(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/v1/inn"
-        headers = {"X-API-Key": self.api_key}
-        params = {"inn": query}
-        return await http_client.get(url, headers=headers, params=params, timeout=self.timeout)
-    
-    async def search_fio(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/v1/fio"
-        headers = {"X-API-Key": self.api_key}
-        params = {"fio": query}
-        return await http_client.get(url, headers=headers, params=params, timeout=self.timeout)
-    
-    async def search_ogrn(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/v1/ogrn"
-        headers = {"X-API-Key": self.api_key}
-        params = {"ogrn": query}
-        return await http_client.get(url, headers=headers, params=params, timeout=self.timeout)
-    
-    async def search_company(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/v1/company"
-        headers = {"X-API-Key": self.api_key}
-        params = {"company": query}
-        return await http_client.get(url, headers=headers, params=params, timeout=self.timeout)
-    
-    async def search_address(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/v1/address"
-        headers = {"X-API-Key": self.api_key}
-        params = {"address": query}
-        return await http_client.get(url, headers=headers, params=params, timeout=self.timeout)
-    
-    async def search_car(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/v1/car"
-        headers = {"X-API-Key": self.api_key}
-        params = {"car": query}
-        return await http_client.get(url, headers=headers, params=params, timeout=self.timeout)
-
-class SeonService(SearchService):
-    async def search_phone(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/v1/phone"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
-        json_data = {"phone": query}
-        return await http_client.post(url, headers=headers, json_data=json_data, timeout=self.timeout)
-
-class HTMLWebService(SearchService):
-    async def search_phone(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/geo/api.php"
-        params = {"json": "1", "telcod": query[:7]}
-        return await http_client.get(url, params=params, timeout=self.timeout)
+        return await self.search_phone(query)
 
 class DepSearchService(SearchService):
+    async def search(self, query: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/quest={query}&lang=ru&token={self.api_key}"
+        return await http_client.get(url, headers={"Accept": "application/json"}, timeout=self.timeout)
+    
     async def search_phone(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/quest={query}&token={self.api_key}"
-        headers = {"Accept": "application/json"}
-        return await http_client.get(url, headers=headers, timeout=self.timeout)
+        return await self.search(query)
     
     async def search_email(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/quest={query}&token={self.api_key}"
-        headers = {"Accept": "application/json"}
-        return await http_client.get(url, headers=headers, timeout=self.timeout)
+        return await self.search(query)
     
     async def search_ip(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/quest={query}&token={self.api_key}"
-        headers = {"Accept": "application/json"}
-        return await http_client.get(url, headers=headers, timeout=self.timeout)
+        return await self.search(query)
     
     async def search_vk(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/quest={query}&token={self.api_key}"
-        headers = {"Accept": "application/json"}
-        return await http_client.get(url, headers=headers, timeout=self.timeout)
+        return await self.search(query)
     
     async def search_inn(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/quest={query}&token={self.api_key}"
-        headers = {"Accept": "application/json"}
-        return await http_client.get(url, headers=headers, timeout=self.timeout)
+        return await self.search(query)
     
     async def search_passport(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/quest={query}&token={self.api_key}"
-        headers = {"Accept": "application/json"}
-        return await http_client.get(url, headers=headers, timeout=self.timeout)
+        return await self.search(query)
     
     async def search_snils(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/quest={query}&token={self.api_key}"
-        headers = {"Accept": "application/json"}
-        return await http_client.get(url, headers=headers, timeout=self.timeout)
+        return await self.search(query)
     
     async def search_fio(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/quest={query}&token={self.api_key}"
-        headers = {"Accept": "application/json"}
-        return await http_client.get(url, headers=headers, timeout=self.timeout)
+        return await self.search(query)
     
     async def search_ogrn(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/quest={query}&token={self.api_key}"
-        headers = {"Accept": "application/json"}
-        return await http_client.get(url, headers=headers, timeout=self.timeout)
+        return await self.search(query)
     
     async def search_company(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/quest={query}&token={self.api_key}"
-        headers = {"Accept": "application/json"}
-        return await http_client.get(url, headers=headers, timeout=self.timeout)
+        return await self.search(query)
     
     async def search_address(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/quest={query}&token={self.api_key}"
-        headers = {"Accept": "application/json"}
-        return await http_client.get(url, headers=headers, timeout=self.timeout)
+        return await self.search(query)
     
     async def search_car(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/quest={query}&token={self.api_key}"
-        headers = {"Accept": "application/json"}
-        return await http_client.get(url, headers=headers, timeout=self.timeout)
+        return await self.search(query)
 
-class FadeAPIService(SearchService):
-    async def search_phone(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/japi/v2/search"
-        headers = {"access_token": self.api_key, "Content-Type": "application/json"}
-        json_data = {"search_type": "phone", "query": query}
-        return await http_client.post(url, headers=headers, json_data=json_data, timeout=self.timeout)
-    
-    async def search_email(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/japi/v2/search"
-        headers = {"access_token": self.api_key, "Content-Type": "application/json"}
-        json_data = {"search_type": "email", "query": query}
-        return await http_client.post(url, headers=headers, json_data=json_data, timeout=self.timeout)
-    
-    async def search_ip(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/japi/v2/search"
-        headers = {"access_token": self.api_key, "Content-Type": "application/json"}
-        json_data = {"search_type": "ip", "query": query}
-        return await http_client.post(url, headers=headers, json_data=json_data, timeout=self.timeout)
-    
-    async def search_vk(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/japi/v2/search"
-        headers = {"access_token": self.api_key, "Content-Type": "application/json"}
-        json_data = {"search_type": "vk", "query": query}
-        return await http_client.post(url, headers=headers, json_data=json_data, timeout=self.timeout)
-    
-    async def search_inn(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/japi/v2/search"
-        headers = {"access_token": self.api_key, "Content-Type": "application/json"}
-        json_data = {"search_type": "inn", "query": query}
-        return await http_client.post(url, headers=headers, json_data=json_data, timeout=self.timeout)
-    
-    async def search_passport(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/japi/v2/search"
-        headers = {"access_token": self.api_key, "Content-Type": "application/json"}
-        json_data = {"search_type": "passport", "query": query}
-        return await http_client.post(url, headers=headers, json_data=json_data, timeout=self.timeout)
-    
-    async def search_snils(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/japi/v2/search"
-        headers = {"access_token": self.api_key, "Content-Type": "application/json"}
-        json_data = {"search_type": "snils", "query": query}
-        return await http_client.post(url, headers=headers, json_data=json_data, timeout=self.timeout)
-    
-    async def search_fio(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/japi/v2/search"
-        headers = {"access_token": self.api_key, "Content-Type": "application/json"}
-        json_data = {"search_type": "fio", "query": query}
-        return await http_client.post(url, headers=headers, json_data=json_data, timeout=self.timeout)
-    
-    async def search_ogrn(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/japi/v2/search"
-        headers = {"access_token": self.api_key, "Content-Type": "application/json"}
-        json_data = {"search_type": "ogrn", "query": query}
-        return await http_client.post(url, headers=headers, json_data=json_data, timeout=self.timeout)
-    
-    async def search_company(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/japi/v2/search"
-        headers = {"access_token": self.api_key, "Content-Type": "application/json"}
-        json_data = {"search_type": "company", "query": query}
-        return await http_client.post(url, headers=headers, json_data=json_data, timeout=self.timeout)
-    
-    async def search_address(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/japi/v2/search"
-        headers = {"access_token": self.api_key, "Content-Type": "application/json"}
-        json_data = {"search_type": "address", "query": query}
-        return await http_client.post(url, headers=headers, json_data=json_data, timeout=self.timeout)
-    
-    async def search_car(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/japi/v2/search"
-        headers = {"access_token": self.api_key, "Content-Type": "application/json"}
-        json_data = {"search_type": "car", "query": query}
-        return await http_client.post(url, headers=headers, json_data=json_data, timeout=self.timeout)
+class SEONService(SearchService):
+    async def search_phone(self, query: str):
+        url = f"{self.base_url}/v1/phone"
+        headers = {"X-API-KEY": self.api_key}
+        return await http_client.post(url, headers=headers, json={"phone": query})
+
+class HTMLWebService(SearchService):
+    async def search_phone(self, query: str):
+        url = f"{self.base_url}/geo/api.php"
+        return await http_client.get(url, params={"json": 1, "telcod": query[:7]})
 
 class ShodanService(SearchService):
-    async def search_ip(self, query: str) -> Dict[str, Any]:
+    async def search_ip(self, query: str):
         url = f"{self.base_url}/shodan/host/{query}"
-        params = {"key": self.api_key}
-        return await http_client.get(url, params=params, timeout=self.timeout)
+        return await http_client.get(url, params={"key": self.api_key})
 
 class VKService(SearchService):
-    async def search_vk(self, query: str) -> Dict[str, Any]:
+    async def search_vk(self, query: str):
         url = f"{self.base_url}/method/users.get"
-        params = {
-            "user_ids": query,
-            "access_token": self.api_key,
-            "v": "5.131"
-        }
-        return await http_client.get(url, params=params, timeout=self.timeout)
+        return await http_client.get(url, params={"user_ids": query, "access_token": self.api_key, "v": "5.131"})
 
 class OFDataService(SearchService):
-    async def search_inn(self, query: str) -> Dict[str, Any]:
+    async def search_inn(self, query: str):
         url = f"{self.base_url}/v2/person"
-        params = {"key": self.api_key, "inn": query}
-        return await http_client.get(url, params=params, timeout=self.timeout)
+        return await http_client.get(url, params={"key": self.api_key, "inn": query})
     
-    async def search_fio(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/v2/search"
-        params = {"key": self.api_key, "fio": query}
-        return await http_client.get(url, params=params, timeout=self.timeout)
-    
-    async def search_ogrn(self, query: str) -> Dict[str, Any]:
+    async def search_ogrn(self, query: str):
         url = f"{self.base_url}/v2/company"
-        params = {"key": self.api_key, "ogrn": query}
-        return await http_client.get(url, params=params, timeout=self.timeout)
+        return await http_client.get(url, params={"key": self.api_key, "ogrn": query})
     
-    async def search_company(self, query: str) -> Dict[str, Any]:
+    async def search_company(self, query: str):
         url = f"{self.base_url}/v2/company"
-        params = {"key": self.api_key, "query": query}
-        return await http_client.get(url, params=params, timeout=self.timeout)
-    
-    async def search_address(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/v2/search"
-        params = {"key": self.api_key, "address": query}
-        return await http_client.get(url, params=params, timeout=self.timeout)
+        return await http_client.get(url, params={"key": self.api_key, "query": query})
 
-search_services: Dict[str, SearchService] = {}
+class CryvenService(SearchService):
+    async def search(self, query: str):
+        url = f"{self.base_url}/api/search"
+        return await http_client.get(url, params={"search": query, "key": self.api_key})
 
-def initialize_services():
-    external_apis = CONFIG["EXTERNAL_APIS"]
-    
-    service_classes = {
-        "snusbase": SnusbaseService,
-        "infinity": InfinityService,
-        "seon": SeonService,
-        "htmlweb": HTMLWebService,
-        "depsearch": DepSearchService,
-        "fadeapi": FadeAPIService,
-        "shodan": ShodanService,
-        "vk": VKService,
-        "ofdata": OFDataService
-    }
-    
-    for service_name, service_config in external_apis.items():
-        if service_name in service_classes:
-            search_services[service_name] = service_classes[service_name](service_name, service_config)
-            logger.info(f"Initialized search service: {service_name}")
+class BigBaseService(SearchService):
+    async def search(self, query: str):
+        url = f"{self.base_url}/search"
+        headers = {"Authorization": self.api_key}
+        return await http_client.post(url, headers=headers, json={"search": query, "page": 1})
 
-initialize_services()
+search_services = {
+    "snusbase": SnusbaseService("snusbase", CONFIG["EXTERNAL_APIS"]["snusbase"]),
+    "depsearch": DepSearchService("depsearch", CONFIG["EXTERNAL_APIS"]["depsearch"]),
+    "seon": SEONService("seon", CONFIG["EXTERNAL_APIS"]["seon"]),
+    "htmlweb": HTMLWebService("htmlweb", CONFIG["EXTERNAL_APIS"]["htmlweb"]),
+    "shodan": ShodanService("shodan", CONFIG["EXTERNAL_APIS"]["shodan"]),
+    "vk": VKService("vk", CONFIG["EXTERNAL_APIS"]["vk"]),
+    "ofdata": OFDataService("ofdata", CONFIG["EXTERNAL_APIS"]["ofdata"]),
+    "cryven": CryvenService("cryven", CONFIG["EXTERNAL_APIS"]["cryven"]),
+    "bigbase": BigBaseService("bigbase", CONFIG["EXTERNAL_APIS"]["bigbase"])
+}
 
 SEARCH_TYPE_MAPPING = {
-    SearchType.PHONE: ["snusbase", "infinity", "seon", "htmlweb", "depsearch", "fadeapi"],
-    SearchType.EMAIL: ["snusbase", "infinity", "depsearch", "fadeapi"],
-    SearchType.IP: ["shodan", "depsearch", "fadeapi"],
-    SearchType.VK: ["vk", "depsearch", "fadeapi"],
-    SearchType.INN: ["ofdata", "infinity", "depsearch", "fadeapi"],
-    SearchType.PASSPORT: ["ofdata", "infinity", "depsearch", "fadeapi"],
-    SearchType.SNILS: ["ofdata", "infinity", "depsearch", "fadeapi"],
-    SearchType.FIO: ["ofdata", "infinity", "depsearch", "fadeapi"],
-    SearchType.OGRN: ["ofdata", "infinity", "depsearch", "fadeapi"],
-    SearchType.COMPANY: ["ofdata", "infinity", "depsearch", "fadeapi"],
-    SearchType.ADDRESS: ["ofdata", "infinity", "depsearch", "fadeapi"],
-    SearchType.CAR: ["ofdata", "infinity", "depsearch", "fadeapi"]
+    SearchType.PHONE: ["snusbase", "depsearch", "seon", "htmlweb", "cryven", "bigbase"],
+    SearchType.EMAIL: ["snusbase", "depsearch", "cryven", "bigbase"],
+    SearchType.IP: ["depsearch", "shodan", "cryven", "bigbase"],
+    SearchType.VK: ["depsearch", "vk", "cryven", "bigbase"],
+    SearchType.INN: ["depsearch", "ofdata", "cryven", "bigbase"],
+    SearchType.PASSPORT: ["depsearch", "cryven", "bigbase"],
+    SearchType.SNILS: ["depsearch", "cryven", "bigbase"],
+    SearchType.FIO: ["depsearch", "cryven", "bigbase"],
+    SearchType.OGRN: ["depsearch", "ofdata", "cryven", "bigbase"],
+    SearchType.COMPANY: ["depsearch", "ofdata", "cryven", "bigbase"],
+    SearchType.ADDRESS: ["depsearch", "cryven", "bigbase"],
+    SearchType.CAR: ["depsearch", "cryven", "bigbase"]
 }
 
 class SearchAggregator:
-    async def search(self, search_type: SearchType, query: str) -> UnifiedResponse:
-        results = []
+    async def search(self, search_type: SearchType, query: str) -> dict:
         sources = {}
-        
+        results = []
         service_names = SEARCH_TYPE_MAPPING.get(search_type, [])
         
-        tasks = []
-        for service_name in service_names:
-            if service_name in search_services:
-                task = self._search_service(service_name, search_type, query)
-                tasks.append(task)
-        
-        if tasks:
-            service_results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            for service_name, result in zip(service_names, service_results):
-                if isinstance(result, Exception):
-                    logger.error(f"Error in service {service_name}: {str(result)}")
-                    sources[service_name] = {
-                        "success": False,
-                        "error": str(result)
-                    }
+        for name in service_names:
+            service = search_services.get(name)
+            if not service:
+                continue
+            try:
+                if name == "snusbase":
+                    res = await service.search_phone(query)
+                elif name == "depsearch":
+                    res = await service.search(query)
+                elif hasattr(service, "search"):
+                    res = await service.search(query)
+                elif search_type == SearchType.PHONE and hasattr(service, "search_phone"):
+                    res = await service.search_phone(query)
+                elif search_type == SearchType.IP and hasattr(service, "search_ip"):
+                    res = await service.search_ip(query)
+                elif search_type == SearchType.VK and hasattr(service, "search_vk"):
+                    res = await service.search_vk(query)
+                elif search_type == SearchType.INN and hasattr(service, "search_inn"):
+                    res = await service.search_inn(query)
+                elif search_type == SearchType.OGRN and hasattr(service, "search_ogrn"):
+                    res = await service.search_ogrn(query)
+                elif search_type == SearchType.COMPANY and hasattr(service, "search_company"):
+                    res = await service.search_company(query)
                 else:
-                    sources[service_name] = {
-                        "success": "error" not in result,
-                        "data": result
-                    }
-                    if "error" not in result and isinstance(result, dict):
-                        results.append(result)
+                    continue
+                sources[name] = {"success": "error" not in res, "data": res}
+                if "error" not in res:
+                    results.append(res)
+            except Exception as e:
+                sources[name] = {"success": False, "error": str(e)}
         
-        return UnifiedResponse(
-            success=len(results) > 0,
-            query_type=search_type.value,
-            query_value=query,
-            results=results,
-            sources=sources,
-            timestamp=datetime.utcnow().isoformat()
-        )
-    
-    async def _search_service(self, service_name: str, search_type: SearchType, query: str) -> Dict[str, Any]:
-        service = search_services.get(service_name)
-        if not service:
-            return {"error": "service_not_found", "message": f"Service {service_name} not found"}
-        
-        method_map = {
-            SearchType.PHONE: service.search_phone,
-            SearchType.EMAIL: service.search_email,
-            SearchType.IP: service.search_ip,
-            SearchType.VK: service.search_vk,
-            SearchType.INN: service.search_inn,
-            SearchType.PASSPORT: service.search_passport,
-            SearchType.SNILS: service.search_snils,
-            SearchType.FIO: service.search_fio,
-            SearchType.OGRN: service.search_ogrn,
-            SearchType.COMPANY: service.search_company,
-            SearchType.ADDRESS: service.search_address,
-            SearchType.CAR: service.search_car
+        return {
+            "success": len(results) > 0,
+            "query_type": search_type.value,
+            "query_value": query,
+            "results": results,
+            "sources": sources,
+            "timestamp": datetime.utcnow().isoformat()
         }
-        
-        method = method_map.get(search_type)
-        if method:
-            return await method(query)
-        else:
-            return {"error": "not_supported", "message": f"Search type {search_type.value} not supported by {service_name}"}
 
 search_aggregator = SearchAggregator()
+app = FastAPI(title="Search API Aggregator", version="1.0")
 
-app = FastAPI(
-    title="Search API Aggregator",
-    description="Unified API for searching across multiple open-source search services",
-    version="1.0.0"
-)
-
-@app.on_event("startup")
-async def startup_event():
-    logger.info("Starting Search API Aggregator...")
-    logger.info(f"Master API Key: {CONFIG['MASTER_API_KEY'][:10]}...")
-    logger.info(f"Configured services: {list(search_services.keys())}")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    await http_client.close()
-    logger.info("HTTP client closed")
-
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    start_time = time.time()
-    
-    logger.info(f"Request: {request.method} {request.url}")
-    
-    response = await call_next(request)
-    
-    process_time = time.time() - start_time
-    logger.info(f"Response: {response.status_code} - {process_time:.3f}s")
-    
-    return response
-
-@app.get("/search", response_model=UnifiedResponse)
+@app.get("/search")
 async def search(
-    request: Request,
-    phone: Optional[str] = Query(None, description="Phone number"),
-    email: Optional[str] = Query(None, description="Email address"),
-    ip: Optional[str] = Query(None, description="IP address"),
-    vk: Optional[str] = Query(None, description="VK ID"),
-    inn: Optional[str] = Query(None, description="INN"),
-    passport: Optional[str] = Query(None, description="Passport number"),
-    snils: Optional[str] = Query(None, description="SNILS"),
-    fio: Optional[str] = Query(None, description="Full name"),
-    ogrn: Optional[str] = Query(None, description="OGRN"),
-    company: Optional[str] = Query(None, description="Company name"),
-    address: Optional[str] = Query(None, description="Address"),
-    car: Optional[str] = Query(None, description="Car license plate"),
-    api: str = Query(..., description="API key")
+    phone: Optional[str] = None,
+    email: Optional[str] = None,
+    ip: Optional[str] = None,
+    vk: Optional[str] = None,
+    inn: Optional[str] = None,
+    passport: Optional[str] = None,
+    snils: Optional[str] = None,
+    fio: Optional[str] = None,
+    ogrn: Optional[str] = None,
+    company: Optional[str] = None,
+    address: Optional[str] = None,
+    car: Optional[str] = None,
+    api: str = Query(...)
 ):
     if not api_key_manager.is_valid_key(api):
-        logger.warning(f"Invalid API key used: {api[:10]}...")
-        raise HTTPException(status_code=401, detail="Invalid or inactive API key")
+        raise HTTPException(401, "Invalid API key")
     
-    if not api_key_manager.check_rate_limit(api):
-        logger.warning(f"Rate limit exceeded for key: {api[:10]}...")
-        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    params = {k: v for k, v in locals().items() if k not in ["api", "request"] and v}
+    if not params:
+        raise HTTPException(400, "No search parameter provided")
+    if len(params) > 1:
+        raise HTTPException(400, "Only one parameter allowed")
     
-    search_params = {
-        "phone": phone,
-        "email": email,
-        "ip": ip,
-        "vk": vk,
-        "inn": inn,
-        "passport": passport,
-        "snils": snils,
-        "fio": fio,
-        "ogrn": ogrn,
-        "company": company,
-        "address": address,
-        "car": car
-    }
+    key = list(params.keys())[0]
+    value = list(params.values())[0]
+    search_type = SearchType(key)
     
-    provided_params = {k: v for k, v in search_params.items() if v is not None}
-    
-    if len(provided_params) == 0:
-        raise HTTPException(status_code=400, detail="At least one search parameter must be provided")
-    
-    if len(provided_params) > 1:
-        raise HTTPException(status_code=400, detail="Only one search parameter can be used per request")
-    
-    param_name, query_value = next(iter(provided_params.items()))
-    search_type = SearchType(param_name)
-    
-    api_key_manager.record_request(api)
-    
-    logger.info(f"Search request: {search_type.value}={query_value} from key {api[:10]}...")
-    
-    result = await search_aggregator.search(search_type, query_value)
-    
-    return result
-
-def verify_master_key(api_key: str) -> bool:
-    return api_key_manager.is_master_key(api_key)
+    result = await search_aggregator.search(search_type, value)
+    return JSONResponse(result)
 
 @app.post("/master/keys")
-async def create_key(
-    request: CreateKeyRequest,
-    x_api_key: str = Header(..., description="Master API key")
-):
-    if not verify_master_key(x_api_key):
-        raise HTTPException(status_code=403, detail="Master API key required")
-    
-    new_key = api_key_manager.create_key(
-        rate_limit=request.rate_limit,
-        rate_limit_period=request.rate_limit_period
-    )
-    
-    logger.info(f"New API key created by master: {new_key}")
-    
-    return {"key": new_key, "message": "API key created successfully"}
+async def create_key(x_api_key: str = Header(...)):
+    if not api_key_manager.is_master_key(x_api_key):
+        raise HTTPException(403, "Master key required")
+    new_key = api_key_manager.create_key()
+    return {"key": new_key}
 
 @app.delete("/master/keys/{key}")
-async def delete_key(
-    key: str,
-    x_api_key: str = Header(..., description="Master API key")
-):
-    if not verify_master_key(x_api_key):
-        raise HTTPException(status_code=403, detail="Master API key required")
-    
+async def delete_key(key: str, x_api_key: str = Header(...)):
+    if not api_key_manager.is_master_key(x_api_key):
+        raise HTTPException(403, "Master key required")
     if api_key_manager.delete_key(key):
-        logger.info(f"API key deleted by master: {key}")
-        return {"message": "API key deleted successfully"}
-    else:
-        raise HTTPException(status_code=404, detail="API key not found or cannot be deleted")
-
-@app.put("/master/keys/{key}/disable")
-async def disable_key(
-    key: str,
-    x_api_key: str = Header(..., description="Master API key")
-):
-    if not verify_master_key(x_api_key):
-        raise HTTPException(status_code=403, detail="Master API key required")
-    
-    if api_key_manager.disable_key(key):
-        logger.info(f"API key disabled by master: {key}")
-        return {"message": "API key disabled successfully"}
-    else:
-        raise HTTPException(status_code=404, detail="API key not found")
-
-@app.put("/master/keys/{key}/enable")
-async def enable_key(
-    key: str,
-    x_api_key: str = Header(..., description="Master API key")
-):
-    if not verify_master_key(x_api_key):
-        raise HTTPException(status_code=403, detail="Master API key required")
-    
-    if api_key_manager.enable_key(key):
-        logger.info(f"API key enabled by master: {key}")
-        return {"message": "API key enabled successfully"}
-    else:
-        raise HTTPException(status_code=404, detail="API key not found")
-
-@app.get("/master/keys")
-async def list_keys(
-    x_api_key: str = Header(..., description="Master API key")
-):
-    if not verify_master_key(x_api_key):
-        raise HTTPException(status_code=403, detail="Master API key required")
-    
-    keys = api_key_manager.get_all_keys()
-    
-    return {"keys": keys}
-
-@app.get("/master/keys/{key}/stats")
-async def get_key_stats(
-    key: str,
-    x_api_key: str = Header(..., description="Master API key")
-):
-    if not verify_master_key(x_api_key):
-        raise HTTPException(status_code=403, detail="Master API key required")
-    
-    stats = api_key_manager.get_key_stats(key)
-    
-    if stats:
-        return stats
-    else:
-        raise HTTPException(status_code=404, detail="API key not found")
+        return {"message": "Deleted"}
+    raise HTTPException(404, "Key not found")
 
 @app.get("/health")
-async def health_check():
+async def health():
+    return {"status": "ok", "services": list(search_services.keys())}
+
+@app.get("/")
+async def root():
     return {
-        "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat(),
-        "services": list(search_services.keys())
+        "name": "Search API Aggregator",
+        "version": "1.0",
+        "endpoints": {
+            "/search": "GET - поиск",
+            "/master/keys": "POST - создать ключ",
+            "/master/keys/{key}": "DELETE - удалить ключ",
+            "/health": "GET - статус"
+        }
     }
 
-def main():
-    uvicorn.run(
-        app,
-        host=CONFIG["HOST"],
-        port=CONFIG["PORT"],
-        log_level=CONFIG["LOG_LEVEL"].lower()
-    )
-
 if __name__ == "__main__":
-    main()
-
-
+    uvicorn.run(app, host="0.0.0.0", port=8000)

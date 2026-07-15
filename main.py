@@ -1,428 +1,557 @@
-#!/usr/bin/env python3
-
-import asyncio
-import json
-import logging
-import time
-import uuid
-from datetime import datetime
-from typing import Any, Dict, List, Optional
-from dataclasses import dataclass
-from enum import Enum
-
-import uvicorn
-from fastapi import FastAPI, HTTPException, Query, Header, Request
+from fastapi import FastAPI, Request, Query, Response, Header, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+import requests
+import re
+import os
+import json
+import secrets
+import string
+from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import asyncio
 import httpx
+import uvicorn
 
-CONFIG = {
-    "HOST": "0.0.0.0",
-    "PORT": 8000,
-    "MASTER_API_KEY": "hsjdjfhrnjdjd72jrhfbsbxjdndn772hdjd92hrjdjx72nrkfusk8qkrklmrwoco52jrmfn95eufjr",
-    "EXTERNAL_APIS": {
-        "snusbase": {
-            "api_key": "sb5029dec66mht55m78fx8bsw6tm8a",
-            "backup_key": "sbmeovhou6ecsn9fd9wcwnwwvsvwnc",
-            "base_url": "https://api.snusbase.com",
-            "timeout": 30
-        },
-        "depsearch": {
-            "api_key": "w8wxpMncT84SyYSDobV6zSFdZGqcnAoJ",
-            "base_url": "https://api.depsearch.sbs",
-            "timeout": 30
-        },
-        "seon": {
-            "api_key": "758f5f54-befb-4125-bd17-931689af6633",
-            "base_url": "https://api.seon.io",
-            "timeout": 30
-        },
-        "htmlweb": {
-            "api_key": "",
-            "base_url": "https://htmlweb.ru",
-            "timeout": 30
-        },
-        "shodan": {
-            "api_key": "xx6gSg9pWYmJcND1hEMbcWuOJtjbHSZ5",
-            "base_url": "https://api.shodan.io",
-            "timeout": 30
-        },
-        "vk": {
-            "api_key": "0af157510af157510af15751aa0a89e69600af10af157516a0bc15996e74fe2b440998c",
-            "base_url": "https://api.vk.com",
-            "timeout": 30
-        },
-        "ofdata": {
-            "api_key": "DiC9ALodH5T12BfR",
-            "base_url": "https://api.ofdata.ru",
-            "timeout": 30
-        },
-        "cryven": {
-            "api_key": "%40Oliver_FloresSS%3ARRCqVLUb",
-            "base_url": "https://cryven.info",
-            "timeout": 30
-        },
-        "bigbase": {
-            "api_key": "hEtcNRmBOGUxGwHX9NfOccaIXbyqCmRF",
-            "base_url": "https://bigbase.top/api",
-            "timeout": 30
-        }
-    },
-    "DEFAULT_RATE_LIMIT": 1000,
-    "DEFAULT_RATE_LIMIT_PERIOD": 3600,
-    "LOG_LEVEL": "INFO",
-    "LOG_FILE": "search_aggregator.log"
-}
+app = FastAPI()
 
-logging.basicConfig(level=getattr(logging, CONFIG["LOG_LEVEL"]))
-logger = logging.getLogger(__name__)
+MASTER_KEY = "hsjdjfhrnjdjd72jrhfbsbxjdndn772hdjd92hrjdjx72nrkfusk8qkrklmrwoco52jrmfn95eufjr"
 
-class SearchType(Enum):
-    PHONE = "phone"
-    EMAIL = "email"
-    IP = "ip"
-    VK = "vk"
-    INN = "inn"
-    PASSPORT = "passport"
-    SNILS = "snils"
-    FIO = "fio"
-    OGRN = "ogrn"
-    COMPANY = "company"
-    ADDRESS = "address"
-    CAR = "car"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+KEYS_FILE = os.path.join(BASE_DIR, "api_keys.json")
+LOG_FILE = os.path.join(BASE_DIR, "keys_log.txt")
 
-class APIKeyStatus(Enum):
-    ACTIVE = "active"
-    DISABLED = "disabled"
+# ====== API КЛЮЧИ ======
+SNUSBASE_KEY = "sby0b7crta98od7efbb8zr70788n2h"
+SNUSBASE_URL = "https://api.snusbase.com/data/search"
 
-@dataclass
-class APIKeyInfo:
-    key: str
-    status: APIKeyStatus
-    created_at: str
-    rate_limit: int
-    rate_limit_period: int
-    request_count: int
-    last_used: Optional[str] = None
+OFDATA_KEY = "DiC9ALodH5T12BfR"
+OFDATA_BASE = "https://api.ofdata.ru/v2"
 
-class APIKeyManager:
-    def __init__(self):
-        self.keys: Dict[str, APIKeyInfo] = {}
-        self.master_key = CONFIG["MASTER_API_KEY"]
-        master_info = APIKeyInfo(
-            key=self.master_key,
-            status=APIKeyStatus.ACTIVE,
-            created_at=datetime.utcnow().isoformat(),
-            rate_limit=-1,
-            rate_limit_period=0,
-            request_count=0
-        )
-        self.keys[self.master_key] = master_info
-        logger.info("Master API key initialized")
-    
-    def is_master_key(self, key: str) -> bool:
-        return key == self.master_key
-    
-    def is_valid_key(self, key: str) -> bool:
-        if key not in self.keys:
-            return False
-        return self.keys[key].status == APIKeyStatus.ACTIVE
-    
-    def create_key(self, rate_limit: int = 1000, rate_limit_period: int = 3600) -> str:
-        new_key = f"sk_{uuid.uuid4().hex}"
-        self.keys[new_key] = APIKeyInfo(
-            key=new_key,
-            status=APIKeyStatus.ACTIVE,
-            created_at=datetime.utcnow().isoformat(),
-            rate_limit=rate_limit,
-            rate_limit_period=rate_limit_period,
-            request_count=0
-        )
-        return new_key
-    
-    def delete_key(self, key: str) -> bool:
-        if key == self.master_key:
-            return False
-        if key in self.keys:
-            del self.keys[key]
+INFINITY_KEY = "N7xQ4Lp2ZWk8F5VcD1mR9H6TyU3E0BJa"
+INFINITY_URL = "https://infinity-search.fun/find.php"
+
+SEON_KEY = "758f5f54-befb-4125-bd17-931689af6633"
+SEON_URL = "https://api.seon.io/SeonRestService/phone-api/v2"
+
+VK_TOKEN = "0af157510af157510af15751aa0a89e69600af10af157516a0bc15996e74fe2b440998c"
+SHODAN_KEY = "xx6gSg9pWYmJcND1hEMbcWuOJtjbHSZ5"
+
+FADE_KEY = "jupit-54cb687d48b31e8234d6ab7f4f"
+FADE_URL = "https://graph.maybebot.icu/japi/v2/search"
+
+DEPSEARCH_TOKEN = "x5OeEQZZbaRv7wljkHXuETQ7JByEznlY"
+DEPSEARCH_URL = "https://api.depsearch.sbs"
+
+CRYVEN_KEY = "%40Oliver_FloresSS%3ARRCqVLUb"
+CRYVEN_BASE = "https://cryven.info"
+
+BIGBASE_TOKEN = "hEtcNRmBOGUxGwHX9NfOccaIXbyqCmRF"
+BIGBASE_URL = "https://bigbase.top/api"
+
+# ====== QUICKFLOW ======
+QUICKFLOW_TOKEN = "063b6819d85570dfe1b5f5b4ba5be14ac1d66a74e848ee9d1588068a9cf9b372"
+QUICKFLOW_URL = "https://api.quickflow.lat"
+
+# ====== TELEGRAM OSINT ======
+TG_OSINT_TOKEN = "76:fBn742F2bJNyb6wW6jatmrZ3NVkogjjO"
+TG_OSINT_BASE_URL = "https://kartoshka.free/v1"
+
+ALLOWED_KEYS = {}
+banned_ips = {}
+failed_attempts = {}
+
+def render_json(data, status_code=200):
+    return Response(
+        content=json.dumps(data, ensure_ascii=False, indent=2),
+        status_code=status_code,
+        media_type="application/json"
+    )
+
+def load_keys():
+    global ALLOWED_KEYS
+    default_keys = {"hdhxhs827dhsb": {"expires_at": None}}
+    if not os.path.exists(KEYS_FILE):
+        try:
+            with open(KEYS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(default_keys, f, indent=2, ensure_ascii=False)
+        except:
+            pass
+        return default_keys
+    try:
+        with open(KEYS_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                migrated = {k: {"expires_at": None} for k in data}
+                with open(KEYS_FILE, 'w', encoding='utf-8') as wf:
+                    json.dump(migrated, wf, indent=2, ensure_ascii=False)
+                return migrated
+            return data
+    except:
+        return default_keys
+
+ALLOWED_KEYS = load_keys()
+
+def save_keys_to_file():
+    try:
+        with open(KEYS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(ALLOWED_KEYS, f, indent=2, ensure_ascii=False)
+    except:
+        pass
+
+def write_to_log(message):
+    print(message)
+    try:
+        with open(LOG_FILE, 'a', encoding='utf-8') as f:
+            f.write(f"{message}\n")
+    except Exception as e:
+        print(f"[ERROR LOGGING] {e}")
+
+def get_real_ip(request: Request):
+    forwarded = request.headers.get('X-Forwarded-For')
+    if forwarded:
+        return forwarded.split(',')[0].strip()
+    return request.client.host if request.client else "127.0.0.1"
+
+def is_ip_banned(ip):
+    if ip in banned_ips:
+        if datetime.now() < banned_ips[ip]:
             return True
+        else:
+            del banned_ips[ip]
+    return False
+
+def ban_ip(ip, days=30):
+    banned_ips[ip] = datetime.now() + timedelta(days=days)
+
+def check_auth(request: Request):
+    ip = get_real_ip(request)
+    auth_key = request.headers.get("X-API-Key") or request.query_params.get("api_key")
+    
+    if is_ip_banned(ip):
         return False
     
-    def get_all_keys(self):
-        return [k.to_dict() for k in self.keys.values()]
-
-api_key_manager = APIKeyManager()
-
-class HTTPClient:
-    def __init__(self):
-        self.client = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
+    if ip in failed_attempts and failed_attempts[ip] >= 15:
+        ban_ip(ip, 30)
+        return False
     
-    async def get(self, url, headers=None, params=None, timeout=30):
-        try:
-            r = await self.client.get(url, headers=headers, params=params, timeout=timeout)
-            return r.json()
-        except Exception as e:
-            return {"error": str(e)}
+    if not auth_key:
+        failed_attempts[ip] = failed_attempts.get(ip, 0) + 1
+        return False
     
-    async def post(self, url, headers=None, json_data=None, timeout=30):
-        try:
-            r = await self.client.post(url, headers=headers, json=json_data, timeout=timeout)
-            return r.json()
-        except Exception as e:
-            return {"error": str(e)}
+    if auth_key == MASTER_KEY:
+        failed_attempts[ip] = 0
+        return True
+    
+    if auth_key in ALLOWED_KEYS:
+        expires_at_str = ALLOWED_KEYS[auth_key].get("expires_at")
+        if expires_at_str:
+            expires_at = datetime.strptime(expires_at_str, "%Y-%m-%d %H:%M:%S")
+            if datetime.now() > expires_at:
+                write_to_log(f"[EXPIRED LOG] [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Ключ '{auth_key}' заблокирован ({expires_at_str}).")
+                return False
+        failed_attempts[ip] = 0
+        return True
+    
+    failed_attempts[ip] = failed_attempts.get(ip, 0) + 1
+    return False
 
-http_client = HTTPClient()
+def sanitize_query(query):
+    if not query:
+        return query
+    return re.sub(r'[^a-zA-Z0-9\s@\.\-_+:яёА-ЯЁ]', '', query)
 
-class SearchService:
-    def __init__(self, name: str, config: dict):
-        self.name = name
-        self.config = config
-        self.api_key = config.get("api_key", "")
-        self.base_url = config.get("base_url", "")
-        self.timeout = config.get("timeout", 30)
+SUPPORTED_PARAMS = [
+    'pass', 'email', 'inn', 'text', 'фио', 'fio', 'phone', 
+    'vkid', 'vk', 'ip', 'snils', 'passport', 'ogrn', 'company',
+    'nick', 'telegram', 'vin', 'username'
+]
 
-class SnusbaseService(SearchService):
-    async def search_phone(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/data/search"
-        for key in [self.api_key, self.config.get("backup_key")]:
+def detect_type(query):
+    q = str(query).strip()
+    q_lower = q.lower()
+    
+    if q_lower.startswith('pass:'):
+        return "pass"
+    if q_lower.startswith('inn') or (re.match(r'^\d{10}$|^\d{12}$', re.sub(r'[^\d]', '', q)) and len(re.sub(r'[^\d]', '', q)) in [10, 12]):
+        return "inn"
+    if re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', q):
+        return "email"
+    if re.match(r'^\+?\d{10,15}$', re.sub(r'[^\d+]', '', q)):
+        return "phone"
+    if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', q):
+        return "ip"
+    if re.match(r'^[0-9]{4}\s?[0-9]{6}$', q) or re.match(r'^[А-Я]{2}\s?[0-9]{7}$', q):
+        return "passport"
+    if re.match(r'^[0-9]{3}-?[0-9]{3}-?[0-9]{3}-?[0-9]{2}$', q):
+        return "snils"
+    if re.match(r'^\d{13}$', q):
+        return "ogrn"
+    if re.match(r'^[A-HJ-NPR-Z0-9]{17}$', q.upper()):
+        return "vin"
+    if q.startswith('@'):
+        return "telegram"
+    if re.match(r'^[А-ЯЁA-Z][а-яёa-zА-ЯЁA-Z0-9\s\-\.\,]+$', q) and len(q) > 3:
+        return "company"
+    return "text"
+
+# ====== WORKERS ======
+
+def depsearch(query):
+    try:
+        url = f"{DEPSEARCH_URL}/quest={query}&lang=ru&token={DEPSEARCH_TOKEN}"
+        r = requests.get(url, headers={"Accept": "application/json"}, timeout=12)
+        if r.status_code == 200:
             try:
-                headers = {"Content-Type": "application/json", "Auth": key}
-                payload = {"terms": [query], "types": ["email"], "wildcard": False}
-                result = await http_client.post(url, headers=headers, json_data=payload, timeout=self.timeout)
-                if "error" not in result:
-                    return result
+                return {"source": "DepSearch", "data": r.json()}
             except:
-                continue
-        return {"error": "All Snusbase keys failed"}
-    
-    async def search_email(self, query: str) -> Dict[str, Any]:
-        return await self.search_phone(query)
+                return {"source": "DepSearch", "data": r.text}
+        return {"source": "DepSearch", "error": r.status_code}
+    except:
+        return {"source": "DepSearch", "error": 504}
 
-class DepSearchService(SearchService):
-    async def search(self, query: str) -> Dict[str, Any]:
-        url = f"{self.base_url}/quest={query}&lang=ru&token={self.api_key}"
-        return await http_client.get(url, headers={"Accept": "application/json"}, timeout=self.timeout)
-    
-    async def search_phone(self, query: str) -> Dict[str, Any]:
-        return await self.search(query)
-    
-    async def search_email(self, query: str) -> Dict[str, Any]:
-        return await self.search(query)
-    
-    async def search_ip(self, query: str) -> Dict[str, Any]:
-        return await self.search(query)
-    
-    async def search_vk(self, query: str) -> Dict[str, Any]:
-        return await self.search(query)
-    
-    async def search_inn(self, query: str) -> Dict[str, Any]:
-        return await self.search(query)
-    
-    async def search_passport(self, query: str) -> Dict[str, Any]:
-        return await self.search(query)
-    
-    async def search_snils(self, query: str) -> Dict[str, Any]:
-        return await self.search(query)
-    
-    async def search_fio(self, query: str) -> Dict[str, Any]:
-        return await self.search(query)
-    
-    async def search_ogrn(self, query: str) -> Dict[str, Any]:
-        return await self.search(query)
-    
-    async def search_company(self, query: str) -> Dict[str, Any]:
-        return await self.search(query)
-    
-    async def search_address(self, query: str) -> Dict[str, Any]:
-        return await self.search(query)
-    
-    async def search_car(self, query: str) -> Dict[str, Any]:
-        return await self.search(query)
-
-class SEONService(SearchService):
-    async def search_phone(self, query: str):
-        url = f"{self.base_url}/v1/phone"
-        headers = {"X-API-KEY": self.api_key}
-        return await http_client.post(url, headers=headers, json={"phone": query})
-
-class HTMLWebService(SearchService):
-    async def search_phone(self, query: str):
-        url = f"{self.base_url}/geo/api.php"
-        return await http_client.get(url, params={"json": 1, "telcod": query[:7]})
-
-class ShodanService(SearchService):
-    async def search_ip(self, query: str):
-        url = f"{self.base_url}/shodan/host/{query}"
-        return await http_client.get(url, params={"key": self.api_key})
-
-class VKService(SearchService):
-    async def search_vk(self, query: str):
-        url = f"{self.base_url}/method/users.get"
-        return await http_client.get(url, params={"user_ids": query, "access_token": self.api_key, "v": "5.131"})
-
-class OFDataService(SearchService):
-    async def search_inn(self, query: str):
-        url = f"{self.base_url}/v2/person"
-        return await http_client.get(url, params={"key": self.api_key, "inn": query})
-    
-    async def search_ogrn(self, query: str):
-        url = f"{self.base_url}/v2/company"
-        return await http_client.get(url, params={"key": self.api_key, "ogrn": query})
-    
-    async def search_company(self, query: str):
-        url = f"{self.base_url}/v2/company"
-        return await http_client.get(url, params={"key": self.api_key, "query": query})
-
-class CryvenService(SearchService):
-    async def search(self, query: str):
-        url = f"{self.base_url}/api/search"
-        return await http_client.get(url, params={"search": query, "key": self.api_key})
-
-class BigBaseService(SearchService):
-    async def search(self, query: str):
-        url = f"{self.base_url}/search"
-        headers = {"Authorization": self.api_key}
-        return await http_client.post(url, headers=headers, json={"search": query, "page": 1})
-
-search_services = {
-    "snusbase": SnusbaseService("snusbase", CONFIG["EXTERNAL_APIS"]["snusbase"]),
-    "depsearch": DepSearchService("depsearch", CONFIG["EXTERNAL_APIS"]["depsearch"]),
-    "seon": SEONService("seon", CONFIG["EXTERNAL_APIS"]["seon"]),
-    "htmlweb": HTMLWebService("htmlweb", CONFIG["EXTERNAL_APIS"]["htmlweb"]),
-    "shodan": ShodanService("shodan", CONFIG["EXTERNAL_APIS"]["shodan"]),
-    "vk": VKService("vk", CONFIG["EXTERNAL_APIS"]["vk"]),
-    "ofdata": OFDataService("ofdata", CONFIG["EXTERNAL_APIS"]["ofdata"]),
-    "cryven": CryvenService("cryven", CONFIG["EXTERNAL_APIS"]["cryven"]),
-    "bigbase": BigBaseService("bigbase", CONFIG["EXTERNAL_APIS"]["bigbase"])
-}
-
-SEARCH_TYPE_MAPPING = {
-    SearchType.PHONE: ["snusbase", "depsearch", "seon", "htmlweb", "cryven", "bigbase"],
-    SearchType.EMAIL: ["snusbase", "depsearch", "cryven", "bigbase"],
-    SearchType.IP: ["depsearch", "shodan", "cryven", "bigbase"],
-    SearchType.VK: ["depsearch", "vk", "cryven", "bigbase"],
-    SearchType.INN: ["depsearch", "ofdata", "cryven", "bigbase"],
-    SearchType.PASSPORT: ["depsearch", "cryven", "bigbase"],
-    SearchType.SNILS: ["depsearch", "cryven", "bigbase"],
-    SearchType.FIO: ["depsearch", "cryven", "bigbase"],
-    SearchType.OGRN: ["depsearch", "ofdata", "cryven", "bigbase"],
-    SearchType.COMPANY: ["depsearch", "ofdata", "cryven", "bigbase"],
-    SearchType.ADDRESS: ["depsearch", "cryven", "bigbase"],
-    SearchType.CAR: ["depsearch", "cryven", "bigbase"]
-}
-
-class SearchAggregator:
-    async def search(self, search_type: SearchType, query: str) -> dict:
-        sources = {}
-        results = []
-        service_names = SEARCH_TYPE_MAPPING.get(search_type, [])
-        
-        for name in service_names:
-            service = search_services.get(name)
-            if not service:
-                continue
+def snusbase(query, search_type):
+    try:
+        headers = {"Content-Type": "application/json", "Auth": SNUSBASE_KEY}
+        snus_type = "password" if search_type == "pass" else "email"
+        payload = {"terms": [str(query).strip()], "types": [snus_type], "wildcard": False}
+        r = requests.post(SNUSBASE_URL, headers=headers, json=payload, timeout=10)
+        if r.status_code == 200:
             try:
-                if name == "snusbase":
-                    res = await service.search_phone(query)
-                elif name == "depsearch":
-                    res = await service.search(query)
-                elif hasattr(service, "search"):
-                    res = await service.search(query)
-                elif search_type == SearchType.PHONE and hasattr(service, "search_phone"):
-                    res = await service.search_phone(query)
-                elif search_type == SearchType.IP and hasattr(service, "search_ip"):
-                    res = await service.search_ip(query)
-                elif search_type == SearchType.VK and hasattr(service, "search_vk"):
-                    res = await service.search_vk(query)
-                elif search_type == SearchType.INN and hasattr(service, "search_inn"):
-                    res = await service.search_inn(query)
-                elif search_type == SearchType.OGRN and hasattr(service, "search_ogrn"):
-                    res = await service.search_ogrn(query)
-                elif search_type == SearchType.COMPANY and hasattr(service, "search_company"):
-                    res = await service.search_company(query)
-                else:
-                    continue
-                sources[name] = {"success": "error" not in res, "data": res}
-                if "error" not in res:
-                    results.append(res)
-            except Exception as e:
-                sources[name] = {"success": False, "error": str(e)}
-        
-        return {
-            "success": len(results) > 0,
-            "query_type": search_type.value,
-            "query_value": query,
-            "results": results,
-            "sources": sources,
-            "timestamp": datetime.utcnow().isoformat()
+                return {"source": "Snusbase", "data": r.json()}
+            except:
+                return {"source": "Snusbase", "data": r.text}
+        return {"source": "Snusbase", "error": r.status_code}
+    except:
+        return {"source": "Snusbase", "error": 504}
+
+def fadeapi(query, search_type):
+    try:
+        headers = {"access_token": FADE_KEY, "Content-Type": "application/json"}
+        type_mapping = {
+            "phone": "phone", "email": "email", "inn": "inn", "ip": "ip",
+            "passport": "passport", "fio": "fio", "фио": "fio", "vk": "vk",
+            "vkid": "vk", "nick": "nick", "telegram": "telegram", "vin": "vin"
         }
+        api_type = type_mapping.get(search_type, "fio")
+        payload = {"search_type": api_type, "query": str(query).strip()}
+        r = requests.post(FADE_URL, headers=headers, json=payload, timeout=15)
+        if r.status_code == 200:
+            try:
+                return {"source": "FadeAPI", "data": r.json()}
+            except:
+                return {"source": "FadeAPI", "data": r.text}
+        return {"source": "FadeAPI", "error": r.status_code}
+    except:
+        return {"source": "FadeAPI", "error": 504}
 
-search_aggregator = SearchAggregator()
-app = FastAPI(title="Search API Aggregator", version="1.0")
+def quickflow_search(query: str):
+    try:
+        url = f"{QUICKFLOW_URL}/get-user"
+        params = {"token": QUICKFLOW_TOKEN, "username": query}
+        r = requests.get(url, params=params, timeout=10)
+        if r.status_code == 200:
+            return {"source": "QuickFlow", "data": r.json()}
+        return {"source": "QuickFlow", "error": r.status_code}
+    except Exception as e:
+        return {"source": "QuickFlow", "error": str(e)}
 
-@app.get("/search")
-async def search(
-    phone: Optional[str] = None,
-    email: Optional[str] = None,
-    ip: Optional[str] = None,
-    vk: Optional[str] = None,
-    inn: Optional[str] = None,
-    passport: Optional[str] = None,
-    snils: Optional[str] = None,
-    fio: Optional[str] = None,
-    ogrn: Optional[str] = None,
-    company: Optional[str] = None,
-    address: Optional[str] = None,
-    car: Optional[str] = None,
-    api: str = Query(...)
-):
-    if not api_key_manager.is_valid_key(api):
-        raise HTTPException(401, "Invalid API key")
+def cryven_search(query):
+    try:
+        url = f"{CRYVEN_BASE}/api/search?search={query}&key={CRYVEN_KEY}"
+        r = requests.get(url, timeout=20)
+        if r.status_code == 200:
+            try:
+                data = r.json()
+                if data.get("success"):
+                    return {"source": "Cryven", "data": data}
+            except:
+                return {"source": "Cryven", "data": r.text}
+        return {"source": "Cryven", "error": r.status_code}
+    except:
+        return {"source": "Cryven", "error": 504}
+
+def bigbase_search(query):
+    try:
+        headers = {"Authorization": BIGBASE_TOKEN, "Content-Type": "application/json"}
+        payload = {"search": query, "page": 1}
+        r = requests.post(BIGBASE_URL + "/search", headers=headers, json=payload, timeout=10)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        if "user" in data and isinstance(data["user"], dict):
+            data["user"].pop("api_token", None)
+        return {"source": "BigBase", "data": data}
+    except:
+        return {"source": "BigBase", "error": 504}
+
+# ====== TELEGRAM OSINT ======
+def tg_osint_api_get(endpoint, params=None):
+    try:
+        headers = {"Authorization": f"Bearer {TG_OSINT_TOKEN}"}
+        res = requests.get(f"{TG_OSINT_BASE_URL}{endpoint}", headers=headers, params=params, timeout=10)
+        if res.status_code != 200:
+            return None
+        data = res.json()
+        if not data.get("ok"):
+            return None
+        return data.get("result")
+    except Exception:
+        return None
+
+def tg_osint_search_owner(query):
+    result = tg_osint_api_get("/owners/search", {"q": query, "limit": 1})
+    if result is None:
+        return None
+    items = result.get("items", [])
+    if not items:
+        return None
+    return items[0]
+
+def tg_osint_get_user_info(query):
+    found = tg_osint_search_owner(query)
+    if found is None:
+        return None
     
-    params = {k: v for k, v in locals().items() if k not in ["api", "request"] and v}
-    if not params:
-        raise HTTPException(400, "No search parameter provided")
-    if len(params) > 1:
-        raise HTTPException(400, "Only one parameter allowed")
+    owner = found.get("owner", {})
+    ref = owner.get("username") or owner.get("telegramId") or owner.get("seeId")
     
-    key = list(params.keys())[0]
-    value = list(params.values())[0]
-    search_type = SearchType(key)
+    info = {
+        "source": "TelegramOSINT",
+        "username": owner.get("username", "Нет"),
+        "telegramId": owner.get("telegramId", "Нет"),
+        "name": owner.get("name", "Нет"),
+        "is_bot": owner.get("isBot", False),
+        "is_premium": owner.get("isPremium", False),
+        "creation_date": owner.get("creationDate", "Нет")
+    }
     
-    result = await search_aggregator.search(search_type, value)
-    return JSONResponse(result)
+    channel_result = tg_osint_api_get(f"/owner/{ref}/personal_channel")
+    if channel_result:
+        info["personal_channel"] = channel_result
+    
+    return info
 
-@app.post("/master/keys")
-async def create_key(x_api_key: str = Header(...)):
-    if not api_key_manager.is_master_key(x_api_key):
-        raise HTTPException(403, "Master key required")
-    new_key = api_key_manager.create_key()
-    return {"key": new_key}
+def tg_osint_get_history(query):
+    found = tg_osint_search_owner(query)
+    if found is None:
+        return None
+    
+    owner = found.get("owner", {})
+    ref = owner.get("username") or owner.get("telegramId") or owner.get("seeId")
+    
+    all_items = []
+    cursor = None
+    while True:
+        params = {"limit": 100}
+        if cursor:
+            params["cursor"] = cursor
+        result = tg_osint_api_get(f"/owner/{ref}/history", params)
+        if result is None:
+            break
+        items = result.get("items", [])
+        if not items:
+            break
+        all_items.extend(items)
+        cursor = result.get("nextCursor")
+        if not cursor:
+            break
+    
+    transfers = [i for i in all_items if i.get("kind") == "GIFT" and i.get("giftAction", {}).get("action") == "transfer"]
+    transfers.sort(key=lambda x: x.get("time", ""), reverse=True)
+    
+    return {
+        "source": "TelegramOSINT",
+        "transfers": transfers[:10],
+        "total_transfers": len(transfers)
+    }
 
-@app.delete("/master/keys/{key}")
-async def delete_key(key: str, x_api_key: str = Header(...)):
-    if not api_key_manager.is_master_key(x_api_key):
-        raise HTTPException(403, "Master key required")
-    if api_key_manager.delete_key(key):
-        return {"message": "Deleted"}
-    raise HTTPException(404, "Key not found")
+# ====== SEARCH ======
+
+@app.api_route("/search", methods=["GET", "POST"])
+async def search(request: Request):
+    try:
+        if not check_auth(request):
+            ip = get_real_ip(request)
+            if is_ip_banned(ip):
+                return render_json({"error": "Your IP is banned for 30 days."}, 403)
+            return render_json({"error": "Unauthorized."}, 401)
+
+        query = None
+        search_type = None
+
+        if request.method == "POST":
+            try:
+                data = await request.json()
+            except:
+                data = {}
+            for param in SUPPORTED_PARAMS:
+                if param in data:
+                    query = data[param]
+                    search_type = param
+                    break
+            if not query:
+                query = data.get('query') or data.get('search')
+        else:
+            for param in SUPPORTED_PARAMS:
+                val = request.query_params.get(param)
+                if val:
+                    query = val
+                    search_type = param
+                    break
+            if not query:
+                query = request.query_params.get('query') or request.query_params.get('search')
+        
+        if not query:
+            return render_json({"error": "Missing search term"}, 400)
+        
+        query = sanitize_query(query)
+        if not search_type:
+            search_type = detect_type(query)
+        
+        result = {"query": query, "type": search_type, "found": False, "data": None}
+        
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = {}
+            
+            # Универсальные API
+            futures[executor.submit(depsearch, query)] = "depsearch"
+            futures[executor.submit(cryven_search, query)] = "cryven"
+            futures[executor.submit(bigbase_search, query)] = "bigbase"
+            futures[executor.submit(fadeapi, query, search_type)] = "fadeapi"
+            
+            # Email / Pass
+            if search_type in ["email", "pass"]:
+                futures[executor.submit(snusbase, query, search_type)] = "snusbase"
+            
+            # Phone
+            if search_type == "phone":
+                futures[executor.submit(fadeapi, query, "phone")] = "fadeapi_phone"
+            
+            # Telegram
+            if search_type in ["telegram", "username"]:
+                clean = query.replace("@", "").strip()
+                futures[executor.submit(quickflow_search, clean)] = "quickflow"
+                futures[executor.submit(tg_osint_get_user_info, clean)] = "tg_info"
+                futures[executor.submit(tg_osint_get_history, clean)] = "tg_history"
+            
+            all_data = {}
+            for future in as_completed(futures):
+                key = futures[future]
+                try:
+                    res = future.result(timeout=15)
+                    if res:
+                        all_data[key] = res
+                except Exception as e:
+                    all_data[key] = {"error": str(e)}
+            
+            if all_data:
+                result["found"] = True
+                result["data"] = all_data
+        
+        return render_json(result)
+    except Exception as e:
+        return render_json({"error": "Internal server error", "details": str(e)}, 500)
+
+# ====== MASTER KEYS ======
+
+@app.api_route("/master/keys", methods=["POST", "GET"])
+async def create_key(request: Request):
+    try:
+        master = request.headers.get("X-Master-Key") or request.query_params.get("master_key")
+        if request.method == "POST":
+            try:
+                data = await request.json()
+            except:
+                data = {}
+            if not master:
+                master = data.get("master_key")
+        
+        if master != MASTER_KEY:
+            return render_json({"error": "Unauthorized."}, 401)
+        
+        username = data.get("username") or data.get("user")
+        global ALLOWED_KEYS
+        
+        if username:
+            clean_username = username.lstrip('@').strip()
+            random_part = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(8))
+            new_key = f"{clean_username}:{random_part}"
+            while new_key in ALLOWED_KEYS:
+                random_part = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(8))
+                new_key = f"{clean_username}:{random_part}"
+        else:
+            new_key = f"sk_{secrets.token_hex(12)}"
+        
+        expires_at_str = data.get("expires_at")
+        rate_limit = data.get("rate_limit", 1000)
+        rate_limit_period = data.get("rate_limit_period", 3600)
+        
+        ALLOWED_KEYS[new_key] = {
+            "expires_at": expires_at_str,
+            "rate_limit": rate_limit,
+            "rate_limit_period": rate_limit_period,
+            "created_at": datetime.now().isoformat()
+        }
+        save_keys_to_file()
+        
+        return render_json({
+            "success": True,
+            "key": new_key,
+            "expires_at": expires_at_str or "Permanent"
+        })
+    except Exception as e:
+        return render_json({"error": str(e)}, 500)
+
+@app.api_route("/master/keys/{key}", methods=["DELETE"])
+async def delete_key(key: str, request: Request):
+    try:
+        master = request.headers.get("X-Master-Key") or request.query_params.get("master_key")
+        if master != MASTER_KEY:
+            return render_json({"error": "Unauthorized."}, 401)
+        
+        global ALLOWED_KEYS
+        if key not in ALLOWED_KEYS:
+            return render_json({"error": "Not found."}, 404)
+        
+        if key == MASTER_KEY:
+            return render_json({"error": "Cannot delete master key."}, 403)
+        
+        del ALLOWED_KEYS[key]
+        save_keys_to_file()
+        
+        return render_json({"success": True, "message": "Removed."})
+    except Exception as e:
+        return render_json({"error": str(e)}, 500)
+
+@app.get("/master/keys/list")
+async def list_keys(request: Request):
+    try:
+        master = request.headers.get("X-Master-Key") or request.query_params.get("master_key")
+        if master != MASTER_KEY:
+            return render_json({"error": "Unauthorized."}, 401)
+        return render_json({"keys": ALLOWED_KEYS})
+    except Exception as e:
+        return render_json({"error": str(e)}, 500)
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "services": list(search_services.keys())}
+    return {"status": "ok", "services": ["DepSearch", "Snusbase", "FadeAPI", "QuickFlow", "Cryven", "BigBase", "TelegramOSINT"]}
 
 @app.get("/")
-async def root():
-    return {
-        "name": "Search API Aggregator",
-        "version": "1.0",
+async def home():
+    return render_json({
+        "name": "Router API",
+        "author": "@y3Huk_iphone",
+        "version": "2.0",
         "endpoints": {
-            "/search": "GET - поиск",
-            "/master/keys": "POST - создать ключ",
-            "/master/keys/{key}": "DELETE - удалить ключ",
-            "/health": "GET - статус"
+            "/search": "GET/POST - универсальный поиск",
+            "Нашли баги? Пишите",
+            "баги: Пофикшены, поиск работает ♡",
+            "Приятного пользования!",
+            "/health" Статус API"
         }
-    }
+    })
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port, workers=1)

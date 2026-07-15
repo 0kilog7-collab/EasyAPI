@@ -124,10 +124,8 @@ def ban_ip(ip, days=30):
 async def check_auth(request: Request):
     ip = get_real_ip(request)
     
-    # 1. Сначала ищем в заголовках или параметрах запроса
     auth_key = request.headers.get("X-API-Key") or request.query_params.get("api_key")
     
-    # 2. Если запрос POST и ключ не найден, пробуем прочитать его из JSON-тела
     if not auth_key and request.method == "POST":
         try:
             body = await request.json()
@@ -135,27 +133,24 @@ async def check_auth(request: Request):
         except Exception:
             pass
     
-    # Проверка на бан IP
-    is_blocked = False
-    if is_ip_banned(ip):
-        is_blocked = True
-    elif ip in failed_attempts and failed_attempts[ip] >= 15:
-        ban_ip(ip, 30)
-        is_blocked = True
-    
-    # Если ключ не предоставлен вообще
-    if not auth_key:
-        failed_attempts[ip] = failed_attempts.get(ip, 0) + 1
-        return False
-    
-    # 3. Валидация мастер-ключа (игнорирует бан IP)
+    # === МАСТЕР-КЛЮЧ — ВСЕГДА TRUE, ИГНОРИРУЕТ ВСЁ ===
     if auth_key == MASTER_KEY:
         failed_attempts[ip] = 0
         if ip in banned_ips:
             del banned_ips[ip]
         return True
     
-    # 4. Валидация обычных ключей (игнорирует бан IP, если ключ верен)
+    # Проверка на бан IP (только для обычных ключей)
+    if is_ip_banned(ip):
+        return False
+    elif ip in failed_attempts and failed_attempts[ip] >= 15:
+        ban_ip(ip, 30)
+        return False
+    
+    if not auth_key:
+        failed_attempts[ip] = failed_attempts.get(ip, 0) + 1
+        return False
+    
     if auth_key in ALLOWED_KEYS:
         expires_at_str = ALLOWED_KEYS[auth_key].get("expires_at")
         if expires_at_str:
@@ -166,18 +161,16 @@ async def check_auth(request: Request):
                     expires_at = datetime.strptime(expires_at_str, "%Y-%m-%d %H:%M:%S")
                 
                 if datetime.now() > expires_at:
-                    write_to_log(f"[EXPIRED LOG] [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Ключ '{auth_key}' заблокирован ({expires_at_str}).")
+                    write_to_log(f"[EXPIRED LOG] Ключ '{auth_key}' просрочен ({expires_at_str}).")
                     return False
             except Exception as e:
-                write_to_log(f"[DATE ERROR] Не удалось распарсить дату '{expires_at_str}': {e}")
+                write_to_log(f"[DATE ERROR] {e}")
         
-        # Сбрасываем блокировки для валидного ключа
         failed_attempts[ip] = 0
         if ip in banned_ips:
             del banned_ips[ip]
         return True
     
-    # Неверный ключ
     failed_attempts[ip] = failed_attempts.get(ip, 0) + 1
     return False
 
@@ -482,14 +475,38 @@ async def search(request: Request):
         with ThreadPoolExecutor(max_workers=8) as executor:
             futures = {}
             
-            # Если ищем Telegram/Username, то запускаем ТОЛЬКО QuickFlow и TGosint
-            if search_type in ["telegram", "username"]:
+            # === ОПРЕДЕЛЯЕМ МАСТЕР-КЛЮЧ ===
+            auth_key = request.headers.get("X-API-Key") or request.query_params.get("api_key")
+            if not auth_key and request.method == "POST":
+                try:
+                    body = await request.json()
+                    auth_key = body.get("api_key") or body.get("X-API-Key")
+                except Exception:
+                    pass
+            
+            is_master = (auth_key == MASTER_KEY)
+            
+            # === МАСТЕР-КЛЮЧ — ВСЕ БАЗЫ ДЛЯ ЛЮБОГО ТИПА ===
+            if is_master:
+                print("[SEARCH] MASTER KEY DETECTED — RUNNING ALL DATABASES")
+                clean = query.replace("@", "").strip()
+                futures[executor.submit(depsearch, query)] = "depsearch"
+                futures[executor.submit(cryven_search, query)] = "cryven"
+                futures[executor.submit(bigbase_search, query)] = "bigbase"
+                futures[executor.submit(fadeapi, query, search_type)] = "fadeapi"
+                futures[executor.submit(snusbase, query, search_type if search_type in ["email", "pass"] else "email")] = "snusbase"
+                futures[executor.submit(quickflow_search, clean)] = "quickflow"
+                futures[executor.submit(tg_osint_get_user_info, clean)] = "tg_info"
+                futures[executor.submit(tg_osint_get_history, clean)] = "tg_history"
+                if search_type == "phone":
+                    futures[executor.submit(fadeapi, query, "phone")] = "fadeapi_phone"
+            
+            # === ОБЫЧНЫЙ КЛЮЧ ===
+            elif search_type in ["telegram", "username"]:
                 clean = query.replace("@", "").strip()
                 futures[executor.submit(quickflow_search, clean)] = "quickflow"
                 futures[executor.submit(tg_osint_get_user_info, clean)] = "tg_info"
                 futures[executor.submit(tg_osint_get_history, clean)] = "tg_history"
-            
-            # Для всех остальных типов запросов (телефон, email, ИНН и др.) опрашиваем стандартные базы
             else:
                 futures[executor.submit(depsearch, query)] = "depsearch"
                 futures[executor.submit(cryven_search, query)] = "cryven"
@@ -503,10 +520,11 @@ async def search(request: Request):
                     futures[executor.submit(fadeapi, query, "phone")] = "fadeapi_phone"
             
             all_data = {}
+            timeout_value = 25 if is_master else 15
             for future in as_completed(futures):
                 key = futures[future]
                 try:
-                    res = future.result(timeout=15)
+                    res = future.result(timeout=timeout_value)
                     if res:
                         all_data[key] = res
                 except Exception as e:
@@ -543,7 +561,6 @@ async def create_key(request: Request):
         
         global ALLOWED_KEYS
         
-        # Ключи всегда создаются в формате Router:Gve8Nw8B
         random_part = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(8))
         new_key = f"Router:{random_part}"
         while new_key in ALLOWED_KEYS:

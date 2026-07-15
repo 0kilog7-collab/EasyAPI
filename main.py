@@ -225,14 +225,19 @@ def detect_type(query):
 def depsearch(query):
     try:
         url = f"{DEPSEARCH_URL}/quest={query}&lang=ru&token={DEPSEARCH_TOKEN}"
+        print(f"[DEPSEARCH] URL: {url}")
         r = requests.get(url, headers={"Accept": "application/json"}, timeout=12)
+        print(f"[DEPSEARCH] STATUS: {r.status_code}")
+        print(f"[DEPSEARCH] HEADERS: {dict(r.headers)}")
+        print(f"[DEPSEARCH] TEXT: {r.text[:500] if r.text else 'EMPTY'}")
         if r.status_code == 200:
             try:
                 return {"source": "DepSearch", "data": r.json()}
             except:
                 return {"source": "DepSearch", "data": r.text}
         return {"source": "DepSearch", "error": r.status_code}
-    except:
+    except Exception as e:
+        print(f"[DEPSEARCH] EXCEPTION: {e}")
         return {"source": "DepSearch", "error": 504}
 
 def snusbase(query, search_type):
@@ -240,14 +245,20 @@ def snusbase(query, search_type):
         headers = {"Content-Type": "application/json", "Auth": SNUSBASE_KEY}
         snus_type = "password" if search_type == "pass" else "email"
         payload = {"terms": [str(query).strip()], "types": [snus_type], "wildcard": False}
+        print(f"[SNUSBASE] URL: {SNUSBASE_URL}")
+        print(f"[SNUSBASE] PAYLOAD: {payload}")
         r = requests.post(SNUSBASE_URL, headers=headers, json=payload, timeout=10)
+        print(f"[SNUSBASE] STATUS: {r.status_code}")
+        print(f"[SNUSBASE] HEADERS: {dict(r.headers)}")
+        print(f"[SNUSBASE] TEXT: {r.text[:500] if r.text else 'EMPTY'}")
         if r.status_code == 200:
             try:
                 return {"source": "Snusbase", "data": r.json()}
             except:
                 return {"source": "Snusbase", "data": r.text}
         return {"source": "Snusbase", "error": r.status_code}
-    except:
+    except Exception as e:
+        print(f"[SNUSBASE] EXCEPTION: {e}")
         return {"source": "Snusbase", "error": 504}
 
 def fadeapi(query, search_type):
@@ -260,31 +271,47 @@ def fadeapi(query, search_type):
         }
         api_type = type_mapping.get(search_type, "fio")
         payload = {"search_type": api_type, "query": str(query).strip()}
+        print(f"[FADEAPI] URL: {FADE_URL}")
+        print(f"[FADEAPI] PAYLOAD: {payload}")
         r = requests.post(FADE_URL, headers=headers, json=payload, timeout=15)
+        print(f"[FADEAPI] STATUS: {r.status_code}")
+        print(f"[FADEAPI] HEADERS: {dict(r.headers)}")
+        print(f"[FADEAPI] TEXT: {r.text[:500] if r.text else 'EMPTY'}")
         if r.status_code == 200:
             try:
                 return {"source": "FadeAPI", "data": r.json()}
             except:
                 return {"source": "FadeAPI", "data": r.text}
         return {"source": "FadeAPI", "error": r.status_code}
-    except:
+    except Exception as e:
+        print(f"[FADEAPI] EXCEPTION: {e}")
         return {"source": "FadeAPI", "error": 504}
 
 def quickflow_search(query: str):
     try:
         url = f"{QUICKFLOW_URL}/get-user"
         params = {"token": QUICKFLOW_TOKEN, "username": query}
+        print(f"[QUICKFLOW] URL: {url}")
+        print(f"[QUICKFLOW] PARAMS: {params}")
         r = requests.get(url, params=params, timeout=10)
+        print(f"[QUICKFLOW] STATUS: {r.status_code}")
+        print(f"[QUICKFLOW] HEADERS: {dict(r.headers)}")
+        print(f"[QUICKFLOW] TEXT: {r.text[:500] if r.text else 'EMPTY'}")
         if r.status_code == 200:
             return {"source": "QuickFlow", "data": r.json()}
         return {"source": "QuickFlow", "error": r.status_code}
     except Exception as e:
+        print(f"[QUICKFLOW] EXCEPTION: {e}")
         return {"source": "QuickFlow", "error": str(e)}
 
 def cryven_search(query):
     try:
         url = f"{CRYVEN_BASE}/api/search?search={query}&key={CRYVEN_KEY}"
+        print(f"[CRYVEN] URL: {url}")
         r = requests.get(url, timeout=20)
+        print(f"[CRYVEN] STATUS: {r.status_code}")
+        print(f"[CRYVEN] HEADERS: {dict(r.headers)}")
+        print(f"[CRYVEN] TEXT: {r.text[:500] if r.text else 'EMPTY'}")
         if r.status_code == 200:
             try:
                 data = r.json()
@@ -293,35 +320,49 @@ def cryven_search(query):
             except:
                 return {"source": "Cryven", "data": r.text}
         return {"source": "Cryven", "error": r.status_code}
-    except:
+    except Exception as e:
+        print(f"[CRYVEN] EXCEPTION: {e}")
         return {"source": "Cryven", "error": 504}
 
 def bigbase_search(query):
     try:
         headers = {"Authorization": BIGBASE_TOKEN, "Content-Type": "application/json"}
         payload = {"search": query, "page": 1}
+        print(f"[BIGBASE] URL: {BIGBASE_URL}/search")
+        print(f"[BIGBASE] PAYLOAD: {payload}")
         r = requests.post(BIGBASE_URL + "/search", headers=headers, json=payload, timeout=10)
+        print(f"[BIGBASE] STATUS: {r.status_code}")
+        print(f"[BIGBASE] HEADERS: {dict(r.headers)}")
+        print(f"[BIGBASE] TEXT: {r.text[:500] if r.text else 'EMPTY'}")
         if r.status_code != 200:
             return None
         data = r.json()
         if "user" in data and isinstance(data["user"], dict):
             data["user"].pop("api_token", None)
         return {"source": "BigBase", "data": data}
-    except:
+    except Exception as e:
+        print(f"[BIGBASE] EXCEPTION: {e}")
         return {"source": "BigBase", "error": 504}
 
 # ====== TELEGRAM OSINT ======
 def tg_osint_api_get(endpoint, params=None):
     try:
         headers = {"Authorization": f"Bearer {TG_OSINT_TOKEN}"}
-        res = requests.get(f"{TG_OSINT_BASE_URL}{endpoint}", headers=headers, params=params, timeout=10)
+        url = f"{TG_OSINT_BASE_URL}{endpoint}"
+        print(f"[TGOSINT] URL: {url}")
+        print(f"[TGOSINT] PARAMS: {params}")
+        res = requests.get(url, headers=headers, params=params, timeout=10)
+        print(f"[TGOSINT] STATUS: {res.status_code}")
+        print(f"[TGOSINT] HEADERS: {dict(res.headers)}")
+        print(f"[TGOSINT] TEXT: {res.text[:500] if res.text else 'EMPTY'}")
         if res.status_code != 200:
             return None
         data = res.json()
         if not data.get("ok"):
             return None
         return data.get("result")
-    except Exception:
+    except Exception as e:
+        print(f"[TGOSINT] EXCEPTION: {e}")
         return None
 
 def tg_osint_search_owner(query):
@@ -434,6 +475,8 @@ async def search(request: Request):
         if not search_type:
             search_type = detect_type(query)
         
+        print(f"[SEARCH] QUERY: {query}, TYPE: {search_type}")
+        
         result = {"query": query, "type": search_type, "found": False, "data": None}
         
         with ThreadPoolExecutor(max_workers=8) as executor:
@@ -467,6 +510,7 @@ async def search(request: Request):
                     if res:
                         all_data[key] = res
                 except Exception as e:
+                    print(f"[SEARCH] ERROR in {key}: {e}")
                     all_data[key] = {"error": str(e)}
             
             if all_data:
@@ -475,6 +519,7 @@ async def search(request: Request):
         
         return render_json(result)
     except Exception as e:
+        print(f"[SEARCH] FATAL ERROR: {e}")
         return render_json({"error": "Internal server error", "details": str(e)}, 500)
 
 # ====== MASTER KEYS ======
@@ -523,6 +568,7 @@ async def create_key(request: Request):
             "expires_at": expires_at_str or "Permanent"
         })
     except Exception as e:
+        print(f"[MASTER/KEYS] ERROR: {e}")
         return render_json({"error": str(e)}, 500)
 
 @app.api_route("/master/keys/{key}", methods=["DELETE"])
@@ -544,6 +590,7 @@ async def delete_key(key: str, request: Request):
         
         return render_json({"success": True, "message": "Removed."})
     except Exception as e:
+        print(f"[MASTER/KEYS/DELETE] ERROR: {e}")
         return render_json({"error": str(e)}, 500)
 
 @app.get("/master/keys/list")
@@ -554,6 +601,7 @@ async def list_keys(request: Request):
             return render_json({"error": "Unauthorized."}, 401)
         return render_json({"keys": ALLOWED_KEYS})
     except Exception as e:
+        print(f"[MASTER/KEYS/LIST] ERROR: {e}")
         return render_json({"error": str(e)}, 500)
 
 @app.get("/health")

@@ -32,12 +32,8 @@ SEON_KEY = "758f5f54-befb-4125-bd17-931689af6633"
 SEON_URL = "https://api.seon.io/SeonRestService/phone-api/v2"
 VK_TOKEN = "0af157510af157510af15751aa0a89e69600af10af157516a0bc15996e74fe2b440998c"
 SHODAN_KEY = "xx6gSg9pWYmJcND1hEMbcWuOJtjbHSZ5"
-FADE_KEY = "jupit-54cb687d48b31e8234d6ab7f4f"
-FADE_URL = "https://graph.maybebot.icu/japi/v2/search"
 DEPSEARCH_TOKEN = "x5OeEQZZbaRv7wljkHXuETQ7JByEznlY"
 DEPSEARCH_URL = "https://api.depsearch.sbs"
-CRYVEN_KEY = "%40Oliver_FloresSS%3ARRCqVLUb"
-CRYVEN_BASE = "https://cryven.info"
 BIGBASE_TOKEN = "hEtcNRmBOGUxGwHX9NfOccaIXbyqCmRF"
 BIGBASE_URL = "https://bigbase.top/api"
 QUICKFLOW_TOKEN = "063b6819d85570dfe1b5f5b4ba5be14ac1d66a74e848ee9d1588068a9cf9b372"
@@ -256,26 +252,6 @@ def snusbase(query, search_type):
     except Exception as e:
         return {"source": "Snusbase", "error": str(e)}
 
-def fadeapi(query, search_type):
-    try:
-        headers = {"access_token": FADE_KEY, "Content-Type": "application/json"}
-        type_mapping = {
-            "phone": "phone", "email": "email", "inn": "inn", "ip": "ip",
-            "passport": "passport", "fio": "fio", "фио": "fio", "vk": "vk",
-            "vkid": "vk", "nick": "nick", "telegram": "telegram", "vin": "vin"
-        }
-        api_type = type_mapping.get(search_type, "fio")
-        payload = {"search_type": api_type, "query": str(query).strip()}
-        r = requests.post(FADE_URL, headers=headers, json=payload, timeout=15)
-        if r.status_code == 200:
-            try: return {"source": "FadeAPI", "data": r.json()}
-            except: return {"source": "FadeAPI", "data": r.text}
-        return {"source": "FadeAPI", "error": r.status_code}
-    except requests.exceptions.Timeout:
-        return {"source": "FadeAPI", "error": 504}
-    except Exception as e:
-        return {"source": "FadeAPI", "error": str(e)}
-
 def quickflow_search(query: str):
     try:
         url = f"{QUICKFLOW_URL}/get-user"
@@ -288,23 +264,6 @@ def quickflow_search(query: str):
         return {"source": "QuickFlow", "error": 504}
     except Exception as e:
         return {"source": "QuickFlow", "error": str(e)}
-
-def cryven_search(query):
-    try:
-        url = f"{CRYVEN_BASE}/api/search?search={query}&key={CRYVEN_KEY}"
-        r = requests.get(url, timeout=20)
-        if r.status_code == 200:
-            try:
-                data = r.json()
-                if data.get("success"):
-                    return {"source": "Cryven", "data": data}
-            except:
-                return {"source": "Cryven", "data": r.text}
-        return {"source": "Cryven", "error": r.status_code}
-    except requests.exceptions.Timeout:
-        return {"source": "Cryven", "error": 504}
-    except Exception as e:
-        return {"source": "Cryven", "error": str(e)}
 
 def bigbase_search(query):
     try:
@@ -478,15 +437,11 @@ async def search(request: Request):
                 print("[SEARCH] MASTER KEY DETECTED — RUNNING ALL DATABASES")
                 clean = query.replace("@", "").strip()
                 futures[executor.submit(depsearch, query)] = "depsearch"
-                futures[executor.submit(cryven_search, query)] = "cryven"
                 futures[executor.submit(bigbase_search, query)] = "bigbase"
-                futures[executor.submit(fadeapi, query, search_type)] = "fadeapi"
                 futures[executor.submit(snusbase, query, search_type if search_type in ["email", "pass"] else "email")] = "snusbase"
                 futures[executor.submit(quickflow_search, clean)] = "quickflow"
                 futures[executor.submit(tg_osint_get_user_info, clean)] = "tg_info"
                 futures[executor.submit(tg_osint_get_history, clean)] = "tg_history"
-                if search_type == "phone":
-                    futures[executor.submit(fadeapi, query, "phone")] = "fadeapi_phone"
             
             elif search_type in ["telegram", "username"]:
                 clean = query.replace("@", "").strip()
@@ -495,15 +450,10 @@ async def search(request: Request):
                 futures[executor.submit(tg_osint_get_history, clean)] = "tg_history"
             else:
                 futures[executor.submit(depsearch, query)] = "depsearch"
-                futures[executor.submit(cryven_search, query)] = "cryven"
                 futures[executor.submit(bigbase_search, query)] = "bigbase"
-                futures[executor.submit(fadeapi, query, search_type)] = "fadeapi"
                 
                 if search_type in ["email", "pass"]:
                     futures[executor.submit(snusbase, query, search_type)] = "snusbase"
-                
-                if search_type == "phone":
-                    futures[executor.submit(fadeapi, query, "phone")] = "fadeapi_phone"
             
             all_data = {}
             timeout_value = 25 if is_master else 15
@@ -635,7 +585,7 @@ async def list_keys(request: Request):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "services": ["DepSearch", "Snusbase", "FadeAPI", "QuickFlow", "Cryven", "BigBase", "TelegramOSINT"]}
+    return {"status": "ok", "services": ["DepSearch", "Snusbase", "QuickFlow", "BigBase", "TelegramOSINT"]}
 
 @app.get("/")
 async def home():

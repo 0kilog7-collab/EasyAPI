@@ -11,7 +11,7 @@ import uvicorn
 
 app = FastAPI()
 
-MASTER_KEY = "Lh8ebOwxuI"
+MASTER_KEY = "router:Lh8ebOwxuI"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 KEYS_FILE = os.path.join(BASE_DIR, "api_keys.json")
@@ -58,7 +58,7 @@ def render_json(data, status_code=200):
 
 def load_keys():
     global ALLOWED_KEYS
-    default_keys = {"hdhxhs827dhsb": {"expires_at": None}}
+    default_keys = {"router:hdhxhs827dhsb": {"expires_at": None}}
     if not os.path.exists(KEYS_FILE):
         try:
             with open(KEYS_FILE, 'w', encoding='utf-8') as f:
@@ -74,6 +74,22 @@ def load_keys():
                 with open(KEYS_FILE, 'w', encoding='utf-8') as wf:
                     json.dump(migrated, wf, indent=2, ensure_ascii=False)
                 return migrated
+            
+            # Migrate old format keys to router: prefix
+            migrated = {}
+            needs_migration = False
+            for key, value in data.items():
+                if not key.startswith("router:"):
+                    migrated[f"router:{key}"] = value
+                    needs_migration = True
+                else:
+                    migrated[key] = value
+            
+            if needs_migration:
+                with open(KEYS_FILE, 'w', encoding='utf-8') as wf:
+                    json.dump(migrated, wf, indent=2, ensure_ascii=False)
+                return migrated
+            
             return data
     except:
         return default_keys
@@ -127,12 +143,20 @@ async def check_auth_and_get_key(request: Request, body_data: dict = None):
     if not auth_key and body_data:
         auth_key = body_data.get("api_key") or body_data.get("X-API-Key")
     
+    if not auth_key:
+        failed_attempts[ip] = failed_attempts.get(ip, 0) + 1
+        return False, None
+    
+    # Normalize the key
+    normalized_key = auth_key if auth_key.startswith("router:") else f"router:{auth_key}"
+    normalized_master = MASTER_KEY if MASTER_KEY.startswith("router:") else f"router:{MASTER_KEY}"
+    
     # === Мaster-key игнорирует любые ограничения ===
-    if auth_key == MASTER_KEY:
+    if normalized_key == normalized_master:
         failed_attempts[ip] = 0
         if ip in banned_ips:
             del banned_ips[ip]
-        return True, auth_key
+        return True, normalized_key
     
     # Проверка на бан IP
     if is_ip_banned(ip):
@@ -141,12 +165,8 @@ async def check_auth_and_get_key(request: Request, body_data: dict = None):
         ban_ip(ip, 30)
         return False, None
     
-    if not auth_key:
-        failed_attempts[ip] = failed_attempts.get(ip, 0) + 1
-        return False, None
-    
-    if auth_key in ALLOWED_KEYS:
-        expires_at_str = ALLOWED_KEYS[auth_key].get("expires_at")
+    if normalized_key in ALLOWED_KEYS:
+        expires_at_str = ALLOWED_KEYS[normalized_key].get("expires_at")
         if expires_at_str:
             try:
                 if "T" in expires_at_str:
@@ -163,7 +183,7 @@ async def check_auth_and_get_key(request: Request, body_data: dict = None):
         failed_attempts[ip] = 0
         if ip in banned_ips:
             del banned_ips[ip]
-        return True, auth_key
+        return True, normalized_key
     
     failed_attempts[ip] = failed_attempts.get(ip, 0) + 1
     return False, None
@@ -216,8 +236,10 @@ def depsearch(query):
             try: return {"source": "DepSearch", "data": r.json()}
             except: return {"source": "DepSearch", "data": r.text}
         return {"source": "DepSearch", "error": r.status_code}
-    except Exception as e:
+    except requests.exceptions.Timeout:
         return {"source": "DepSearch", "error": 504}
+    except Exception as e:
+        return {"source": "DepSearch", "error": str(e)}
 
 def snusbase(query, search_type):
     try:
@@ -229,8 +251,10 @@ def snusbase(query, search_type):
             try: return {"source": "Snusbase", "data": r.json()}
             except: return {"source": "Snusbase", "data": r.text}
         return {"source": "Snusbase", "error": r.status_code}
-    except Exception as e:
+    except requests.exceptions.Timeout:
         return {"source": "Snusbase", "error": 504}
+    except Exception as e:
+        return {"source": "Snusbase", "error": str(e)}
 
 def fadeapi(query, search_type):
     try:
@@ -247,8 +271,10 @@ def fadeapi(query, search_type):
             try: return {"source": "FadeAPI", "data": r.json()}
             except: return {"source": "FadeAPI", "data": r.text}
         return {"source": "FadeAPI", "error": r.status_code}
-    except Exception as e:
+    except requests.exceptions.Timeout:
         return {"source": "FadeAPI", "error": 504}
+    except Exception as e:
+        return {"source": "FadeAPI", "error": str(e)}
 
 def quickflow_search(query: str):
     try:
@@ -258,6 +284,8 @@ def quickflow_search(query: str):
         if r.status_code == 200:
             return {"source": "QuickFlow", "data": r.json()}
         return {"source": "QuickFlow", "error": r.status_code}
+    except requests.exceptions.Timeout:
+        return {"source": "QuickFlow", "error": 504}
     except Exception as e:
         return {"source": "QuickFlow", "error": str(e)}
 
@@ -273,8 +301,10 @@ def cryven_search(query):
             except:
                 return {"source": "Cryven", "data": r.text}
         return {"source": "Cryven", "error": r.status_code}
-    except Exception as e:
+    except requests.exceptions.Timeout:
         return {"source": "Cryven", "error": 504}
+    except Exception as e:
+        return {"source": "Cryven", "error": str(e)}
 
 def bigbase_search(query):
     try:
@@ -287,8 +317,10 @@ def bigbase_search(query):
         if "user" in data and isinstance(data["user"], dict):
             data["user"].pop("api_token", None)
         return {"source": "BigBase", "data": data}
-    except Exception as e:
+    except requests.exceptions.Timeout:
         return {"source": "BigBase", "error": 504}
+    except Exception as e:
+        return {"source": "BigBase", "error": str(e)}
 
 # ====== TELEGRAM OSINT ======
 def tg_osint_api_get(endpoint, params=None):
@@ -302,6 +334,8 @@ def tg_osint_api_get(endpoint, params=None):
         if not data.get("ok"):
             return None
         return data.get("result")
+    except requests.exceptions.Timeout:
+        return None
     except Exception as e:
         return None
 
@@ -321,6 +355,9 @@ def tg_osint_get_user_info(query):
     
     owner = found.get("owner", {})
     ref = owner.get("username") or owner.get("telegramId") or owner.get("seeId")
+    
+    if not ref:
+        return None
     
     info = {
         "source": "TelegramOSINT",
@@ -345,6 +382,9 @@ def tg_osint_get_history(query):
     
     owner = found.get("owner", {})
     ref = owner.get("username") or owner.get("telegramId") or owner.get("seeId")
+    
+    if not ref:
+        return None
     
     all_items = []
     cursor = None
@@ -392,6 +432,10 @@ async def search(request: Request):
             if is_ip_banned(ip):
                 return render_json({"error": "Your IP is banned for 30 days."}, 403)
             return render_json({"error": "Unauthorized."}, 401)
+        
+        # Normalize the key for master check
+        normalized_key = auth_key if auth_key.startswith("router:") else f"router:{auth_key}"
+        normalized_master_key = MASTER_KEY if MASTER_KEY.startswith("router:") else f"router:{MASTER_KEY}"
 
         query = None
         search_type = None
@@ -428,7 +472,7 @@ async def search(request: Request):
         
         with ThreadPoolExecutor(max_workers=8) as executor:
             futures = {}
-            is_master = (auth_key == MASTER_KEY)
+            is_master = (normalized_key == normalized_master_key)
             
             if is_master:
                 print("[SEARCH] MASTER KEY DETECTED — RUNNING ALL DATABASES")
@@ -497,16 +541,23 @@ async def create_key(request: Request):
             if not master:
                 master = data.get("master_key")
         
-        if master != MASTER_KEY:
+        # Normalize master key for comparison
+        if master:
+            normalized_master = master if master.startswith("router:") else f"router:{master}"
+            normalized_master_key = MASTER_KEY if MASTER_KEY.startswith("router:") else f"router:{MASTER_KEY}"
+            
+            if normalized_master != normalized_master_key:
+                return render_json({"error": "Unauthorized."}, 401)
+        else:
             return render_json({"error": "Unauthorized."}, 401)
         
         global ALLOWED_KEYS
         
         random_part = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(8))
-        new_key = f"Router:{random_part}"
+        new_key = f"router:{random_part}"
         while new_key in ALLOWED_KEYS:
             random_part = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(8))
-            new_key = f"Router:{random_part}"
+            new_key = f"router:{random_part}"
         
         expires_at_str = data.get("expires_at")
         rate_limit = data.get("rate_limit", 1000)
@@ -533,17 +584,28 @@ async def create_key(request: Request):
 async def delete_key(key: str, request: Request):
     try:
         master = request.headers.get("X-Master-Key") or request.query_params.get("master_key")
-        if master != MASTER_KEY:
+        
+        # Normalize master key for comparison
+        if master:
+            normalized_master = master if master.startswith("router:") else f"router:{master}"
+            normalized_master_key = MASTER_KEY if MASTER_KEY.startswith("router:") else f"router:{MASTER_KEY}"
+            
+            if normalized_master != normalized_master_key:
+                return render_json({"error": "Unauthorized."}, 401)
+        else:
             return render_json({"error": "Unauthorized."}, 401)
         
         global ALLOWED_KEYS
-        if key not in ALLOWED_KEYS:
+        # Normalize key to handle both formats
+        normalized_key = key if key.startswith("router:") else f"router:{key}"
+        
+        if normalized_key not in ALLOWED_KEYS:
             return render_json({"error": "Not found."}, 404)
         
-        if key == MASTER_KEY:
+        if normalized_key == normalized_master_key:
             return render_json({"error": "Cannot delete master key."}, 403)
         
-        del ALLOWED_KEYS[key]
+        del ALLOWED_KEYS[normalized_key]
         save_keys_to_file()
         
         return render_json({"success": True, "message": "Removed."})
@@ -555,8 +617,17 @@ async def delete_key(key: str, request: Request):
 async def list_keys(request: Request):
     try:
         master = request.headers.get("X-Master-Key") or request.query_params.get("master_key")
-        if master != MASTER_KEY:
+        
+        # Normalize master key for comparison
+        if master:
+            normalized_master = master if master.startswith("router:") else f"router:{master}"
+            normalized_master_key = MASTER_KEY if MASTER_KEY.startswith("router:") else f"router:{MASTER_KEY}"
+            
+            if normalized_master != normalized_master_key:
+                return render_json({"error": "Unauthorized."}, 401)
+        else:
             return render_json({"error": "Unauthorized."}, 401)
+        
         return render_json({"keys": ALLOWED_KEYS})
     except Exception as e:
         print(f"[MASTER/KEYS/LIST] ERROR: {e}")

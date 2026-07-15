@@ -1,5 +1,4 @@
-from fastapi import FastAPI, Request, Query, Response, Header, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request, Response
 import requests
 import re
 import os
@@ -28,29 +27,21 @@ OFDATA_BASE = "https://api.ofdata.ru/v2"
 INFINITY_KEY = "N7xQ4Lp2ZWk8F5VcD1mR9H6TyU3E0BJa"
 INFINITY_URL = "https://infinity-search.fun/find.php"
 
+# Сохраняем остальные ключи...
 SEON_KEY = "758f5f54-befb-4125-bd17-931689af6633"
 SEON_URL = "https://api.seon.io/SeonRestService/phone-api/v2"
-
 VK_TOKEN = "0af157510af157510af15751aa0a89e69600af10af157516a0bc15996e74fe2b440998c"
 SHODAN_KEY = "xx6gSg9pWYmJcND1hEMbcWuOJtjbHSZ5"
-
 FADE_KEY = "jupit-54cb687d48b31e8234d6ab7f4f"
 FADE_URL = "https://graph.maybebot.icu/japi/v2/search"
-
 DEPSEARCH_TOKEN = "x5OeEQZZbaRv7wljkHXuETQ7JByEznlY"
 DEPSEARCH_URL = "https://api.depsearch.sbs"
-
 CRYVEN_KEY = "%40Oliver_FloresSS%3ARRCqVLUb"
 CRYVEN_BASE = "https://cryven.info"
-
 BIGBASE_TOKEN = "hEtcNRmBOGUxGwHX9NfOccaIXbyqCmRF"
 BIGBASE_URL = "https://bigbase.top/api"
-
-# ====== QUICKFLOW ======
 QUICKFLOW_TOKEN = "063b6819d85570dfe1b5f5b4ba5be14ac1d66a74e848ee9d1588068a9cf9b372"
 QUICKFLOW_URL = "https://api.quickflow.lat"
-
-# ====== TELEGRAM OSINT ======
 TG_OSINT_TOKEN = "76:fBn742F2bJNyb6wW6jatmrZ3NVkogjjO"
 TG_OSINT_BASE_URL = "https://kartoshka.free/v1"
 
@@ -121,35 +112,38 @@ def is_ip_banned(ip):
 def ban_ip(ip, days=30):
     banned_ips[ip] = datetime.now() + timedelta(days=days)
 
-async def check_auth(request: Request):
+# ====== ОПТИМИЗИРОВАННАЯ АВТОРИЗАЦИЯ ======
+async def check_auth_and_get_key(request: Request, body_data: dict = None):
+    """
+    Проверяет авторизацию и возвращает (is_authorized, auth_key).
+    Передаем body_data снаружи, чтобы не читать request.json() дважды.
+    """
     ip = get_real_ip(request)
     
+    # 1. Проверяем заголовки и query параметры (самый частый кейс)
     auth_key = request.headers.get("X-API-Key") or request.query_params.get("api_key")
     
-    if not auth_key and request.method == "POST":
-        try:
-            body = await request.json()
-            auth_key = body.get("api_key") or body.get("X-API-Key")
-        except Exception:
-            pass
+    # 2. Если не нашли, смотрим в переданное тело POST-запроса
+    if not auth_key and body_data:
+        auth_key = body_data.get("api_key") or body_data.get("X-API-Key")
     
-    # === МАСТЕР-КЛЮЧ — ВСЕГДА TRUE, ИГНОРИРУЕТ ВСЁ ===
+    # === Мaster-key игнорирует любые ограничения ===
     if auth_key == MASTER_KEY:
         failed_attempts[ip] = 0
         if ip in banned_ips:
             del banned_ips[ip]
-        return True
+        return True, auth_key
     
-    # Проверка на бан IP (только для обычных ключей)
+    # Проверка на бан IP
     if is_ip_banned(ip):
-        return False
+        return False, None
     elif ip in failed_attempts and failed_attempts[ip] >= 15:
         ban_ip(ip, 30)
-        return False
+        return False, None
     
     if not auth_key:
         failed_attempts[ip] = failed_attempts.get(ip, 0) + 1
-        return False
+        return False, None
     
     if auth_key in ALLOWED_KEYS:
         expires_at_str = ALLOWED_KEYS[auth_key].get("expires_at")
@@ -162,17 +156,17 @@ async def check_auth(request: Request):
                 
                 if datetime.now() > expires_at:
                     write_to_log(f"[EXPIRED LOG] Ключ '{auth_key}' просрочен ({expires_at_str}).")
-                    return False
+                    return False, None
             except Exception as e:
                 write_to_log(f"[DATE ERROR] {e}")
         
         failed_attempts[ip] = 0
         if ip in banned_ips:
             del banned_ips[ip]
-        return True
+        return True, auth_key
     
     failed_attempts[ip] = failed_attempts.get(ip, 0) + 1
-    return False
+    return False, None
 
 def sanitize_query(query):
     if not query:
@@ -214,23 +208,15 @@ def detect_type(query):
     return "text"
 
 # ====== WORKERS ======
-
 def depsearch(query):
     try:
         url = f"{DEPSEARCH_URL}/quest={query}&lang=ru&token={DEPSEARCH_TOKEN}"
-        print(f"[DEPSEARCH] URL: {url}")
         r = requests.get(url, headers={"Accept": "application/json"}, timeout=12)
-        print(f"[DEPSEARCH] STATUS: {r.status_code}")
-        print(f"[DEPSEARCH] HEADERS: {dict(r.headers)}")
-        print(f"[DEPSEARCH] TEXT: {r.text[:500] if r.text else 'EMPTY'}")
         if r.status_code == 200:
-            try:
-                return {"source": "DepSearch", "data": r.json()}
-            except:
-                return {"source": "DepSearch", "data": r.text}
+            try: return {"source": "DepSearch", "data": r.json()}
+            except: return {"source": "DepSearch", "data": r.text}
         return {"source": "DepSearch", "error": r.status_code}
     except Exception as e:
-        print(f"[DEPSEARCH] EXCEPTION: {e}")
         return {"source": "DepSearch", "error": 504}
 
 def snusbase(query, search_type):
@@ -238,20 +224,12 @@ def snusbase(query, search_type):
         headers = {"Content-Type": "application/json", "Auth": SNUSBASE_KEY}
         snus_type = "password" if search_type == "pass" else "email"
         payload = {"terms": [str(query).strip()], "types": [snus_type], "wildcard": False}
-        print(f"[SNUSBASE] URL: {SNUSBASE_URL}")
-        print(f"[SNUSBASE] PAYLOAD: {payload}")
         r = requests.post(SNUSBASE_URL, headers=headers, json=payload, timeout=10)
-        print(f"[SNUSBASE] STATUS: {r.status_code}")
-        print(f"[SNUSBASE] HEADERS: {dict(r.headers)}")
-        print(f"[SNUSBASE] TEXT: {r.text[:500] if r.text else 'EMPTY'}")
         if r.status_code == 200:
-            try:
-                return {"source": "Snusbase", "data": r.json()}
-            except:
-                return {"source": "Snusbase", "data": r.text}
+            try: return {"source": "Snusbase", "data": r.json()}
+            except: return {"source": "Snusbase", "data": r.text}
         return {"source": "Snusbase", "error": r.status_code}
     except Exception as e:
-        print(f"[SNUSBASE] EXCEPTION: {e}")
         return {"source": "Snusbase", "error": 504}
 
 def fadeapi(query, search_type):
@@ -264,47 +242,29 @@ def fadeapi(query, search_type):
         }
         api_type = type_mapping.get(search_type, "fio")
         payload = {"search_type": api_type, "query": str(query).strip()}
-        print(f"[FADEAPI] URL: {FADE_URL}")
-        print(f"[FADEAPI] PAYLOAD: {payload}")
         r = requests.post(FADE_URL, headers=headers, json=payload, timeout=15)
-        print(f"[FADEAPI] STATUS: {r.status_code}")
-        print(f"[FADEAPI] HEADERS: {dict(r.headers)}")
-        print(f"[FADEAPI] TEXT: {r.text[:500] if r.text else 'EMPTY'}")
         if r.status_code == 200:
-            try:
-                return {"source": "FadeAPI", "data": r.json()}
-            except:
-                return {"source": "FadeAPI", "data": r.text}
+            try: return {"source": "FadeAPI", "data": r.json()}
+            except: return {"source": "FadeAPI", "data": r.text}
         return {"source": "FadeAPI", "error": r.status_code}
     except Exception as e:
-        print(f"[FADEAPI] EXCEPTION: {e}")
         return {"source": "FadeAPI", "error": 504}
 
 def quickflow_search(query: str):
     try:
         url = f"{QUICKFLOW_URL}/get-user"
         params = {"token": QUICKFLOW_TOKEN, "username": query}
-        print(f"[QUICKFLOW] URL: {url}")
-        print(f"[QUICKFLOW] PARAMS: {params}")
         r = requests.get(url, params=params, timeout=10)
-        print(f"[QUICKFLOW] STATUS: {r.status_code}")
-        print(f"[QUICKFLOW] HEADERS: {dict(r.headers)}")
-        print(f"[QUICKFLOW] TEXT: {r.text[:500] if r.text else 'EMPTY'}")
         if r.status_code == 200:
             return {"source": "QuickFlow", "data": r.json()}
         return {"source": "QuickFlow", "error": r.status_code}
     except Exception as e:
-        print(f"[QUICKFLOW] EXCEPTION: {e}")
         return {"source": "QuickFlow", "error": str(e)}
 
 def cryven_search(query):
     try:
         url = f"{CRYVEN_BASE}/api/search?search={query}&key={CRYVEN_KEY}"
-        print(f"[CRYVEN] URL: {url}")
         r = requests.get(url, timeout=20)
-        print(f"[CRYVEN] STATUS: {r.status_code}")
-        print(f"[CRYVEN] HEADERS: {dict(r.headers)}")
-        print(f"[CRYVEN] TEXT: {r.text[:500] if r.text else 'EMPTY'}")
         if r.status_code == 200:
             try:
                 data = r.json()
@@ -314,19 +274,13 @@ def cryven_search(query):
                 return {"source": "Cryven", "data": r.text}
         return {"source": "Cryven", "error": r.status_code}
     except Exception as e:
-        print(f"[CRYVEN] EXCEPTION: {e}")
         return {"source": "Cryven", "error": 504}
 
 def bigbase_search(query):
     try:
         headers = {"Authorization": BIGBASE_TOKEN, "Content-Type": "application/json"}
         payload = {"search": query, "page": 1}
-        print(f"[BIGBASE] URL: {BIGBASE_URL}/search")
-        print(f"[BIGBASE] PAYLOAD: {payload}")
         r = requests.post(BIGBASE_URL + "/search", headers=headers, json=payload, timeout=10)
-        print(f"[BIGBASE] STATUS: {r.status_code}")
-        print(f"[BIGBASE] HEADERS: {dict(r.headers)}")
-        print(f"[BIGBASE] TEXT: {r.text[:500] if r.text else 'EMPTY'}")
         if r.status_code != 200:
             return None
         data = r.json()
@@ -334,7 +288,6 @@ def bigbase_search(query):
             data["user"].pop("api_token", None)
         return {"source": "BigBase", "data": data}
     except Exception as e:
-        print(f"[BIGBASE] EXCEPTION: {e}")
         return {"source": "BigBase", "error": 504}
 
 # ====== TELEGRAM OSINT ======
@@ -342,12 +295,7 @@ def tg_osint_api_get(endpoint, params=None):
     try:
         headers = {"Authorization": f"Bearer {TG_OSINT_TOKEN}"}
         url = f"{TG_OSINT_BASE_URL}{endpoint}"
-        print(f"[TGOSINT] URL: {url}")
-        print(f"[TGOSINT] PARAMS: {params}")
         res = requests.get(url, headers=headers, params=params, timeout=10)
-        print(f"[TGOSINT] STATUS: {res.status_code}")
-        print(f"[TGOSINT] HEADERS: {dict(res.headers)}")
-        print(f"[TGOSINT] TEXT: {res.text[:500] if res.text else 'EMPTY'}")
         if res.status_code != 200:
             return None
         data = res.json()
@@ -355,7 +303,6 @@ def tg_osint_api_get(endpoint, params=None):
             return None
         return data.get("result")
     except Exception as e:
-        print(f"[TGOSINT] EXCEPTION: {e}")
         return None
 
 def tg_osint_search_owner(query):
@@ -425,12 +372,22 @@ def tg_osint_get_history(query):
         "total_transfers": len(transfers)
     }
 
-# ====== SEARCH ======
-
+# ====== SEARCH ROUTE ======
 @app.api_route("/search", methods=["GET", "POST"])
 async def search(request: Request):
     try:
-        if not await check_auth(request):
+        # Сначала безопасно считываем JSON-тело ОДИН раз, если это POST
+        body_data = {}
+        if request.method == "POST":
+            try:
+                body_data = await request.json()
+            except:
+                pass
+
+        # Выполняем авторизацию
+        is_authorized, auth_key = await check_auth_and_get_key(request, body_data)
+        
+        if not is_authorized:
             ip = get_real_ip(request)
             if is_ip_banned(ip):
                 return render_json({"error": "Your IP is banned for 30 days."}, 403)
@@ -439,18 +396,15 @@ async def search(request: Request):
         query = None
         search_type = None
 
+        # Разбор поисковых параметров
         if request.method == "POST":
-            try:
-                data = await request.json()
-            except:
-                data = {}
             for param in SUPPORTED_PARAMS:
-                if param in data:
-                    query = data[param]
+                if param in body_data:
+                    query = body_data[param]
                     search_type = param
                     break
             if not query:
-                query = data.get('query') or data.get('search')
+                query = body_data.get('query') or body_data.get('search')
         else:
             for param in SUPPORTED_PARAMS:
                 val = request.query_params.get(param)
@@ -474,19 +428,8 @@ async def search(request: Request):
         
         with ThreadPoolExecutor(max_workers=8) as executor:
             futures = {}
-            
-            # === ОПРЕДЕЛЯЕМ МАСТЕР-КЛЮЧ ===
-            auth_key = request.headers.get("X-API-Key") or request.query_params.get("api_key")
-            if not auth_key and request.method == "POST":
-                try:
-                    body = await request.json()
-                    auth_key = body.get("api_key") or body.get("X-API-Key")
-                except Exception:
-                    pass
-            
             is_master = (auth_key == MASTER_KEY)
             
-            # === МАСТЕР-КЛЮЧ — ВСЕ БАЗЫ ДЛЯ ЛЮБОГО ТИПА ===
             if is_master:
                 print("[SEARCH] MASTER KEY DETECTED — RUNNING ALL DATABASES")
                 clean = query.replace("@", "").strip()
@@ -501,7 +444,6 @@ async def search(request: Request):
                 if search_type == "phone":
                     futures[executor.submit(fadeapi, query, "phone")] = "fadeapi_phone"
             
-            # === ОБЫЧНЫЙ КЛЮЧ ===
             elif search_type in ["telegram", "username"]:
                 clean = query.replace("@", "").strip()
                 futures[executor.submit(quickflow_search, clean)] = "quickflow"
@@ -541,7 +483,6 @@ async def search(request: Request):
         return render_json({"error": "Internal server error", "details": str(e)}, 500)
 
 # ====== MASTER KEYS ======
-
 @app.api_route("/master/keys", methods=["POST", "GET"])
 async def create_key(request: Request):
     try:

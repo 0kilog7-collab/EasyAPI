@@ -12,7 +12,7 @@ import uvicorn
 
 app = FastAPI()
 
-MASTER_KEY = "hsjdjfhrnjdjd72jrhfbsbxjdndn772hdjd92hrjdjx72nrkfusk8qkrklmrwoco52jrmfn95eufjr"
+MASTER_KEY = "Lh8ebOwxuI"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 KEYS_FILE = os.path.join(BASE_DIR, "api_keys.json")

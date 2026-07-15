@@ -28,7 +28,6 @@ OFDATA_BASE = "https://api.ofdata.ru/v2"
 INFINITY_KEY = "N7xQ4Lp2ZWk8F5VcD1mR9H6TyU3E0BJa"
 INFINITY_URL = "https://infinity-search.fun/find.php"
 
-# Скрытый/демо-ключ SEON для безопасности
 SEON_KEY = "758f5f54-befb-4125-bd17-931689af6633"
 SEON_URL = "https://api.seon.io/SeonRestService/phone-api/v2"
 
@@ -397,7 +396,6 @@ def tg_osint_get_history(query):
 @app.api_route("/search", methods=["GET", "POST"])
 async def search(request: Request):
     try:
-        # Важно: используем await перед асинхронной функцией проверки
         if not await check_auth(request):
             ip = get_real_ip(request)
             if is_ip_banned(ip):
@@ -441,22 +439,25 @@ async def search(request: Request):
         with ThreadPoolExecutor(max_workers=8) as executor:
             futures = {}
             
-            futures[executor.submit(depsearch, query)] = "depsearch"
-            futures[executor.submit(cryven_search, query)] = "cryven"
-            futures[executor.submit(bigbase_search, query)] = "bigbase"
-            futures[executor.submit(fadeapi, query, search_type)] = "fadeapi"
-            
-            if search_type in ["email", "pass"]:
-                futures[executor.submit(snusbase, query, search_type)] = "snusbase"
-            
-            if search_type == "phone":
-                futures[executor.submit(fadeapi, query, "phone")] = "fadeapi_phone"
-            
+            # Если ищем Telegram/Username, то запускаем ТОЛЬКО QuickFlow и TGosint
             if search_type in ["telegram", "username"]:
                 clean = query.replace("@", "").strip()
                 futures[executor.submit(quickflow_search, clean)] = "quickflow"
                 futures[executor.submit(tg_osint_get_user_info, clean)] = "tg_info"
                 futures[executor.submit(tg_osint_get_history, clean)] = "tg_history"
+            
+            # Для всех остальных типов запросов (телефон, email, ИНН и др.) опрашиваем стандартные базы
+            else:
+                futures[executor.submit(depsearch, query)] = "depsearch"
+                futures[executor.submit(cryven_search, query)] = "cryven"
+                futures[executor.submit(bigbase_search, query)] = "bigbase"
+                futures[executor.submit(fadeapi, query, search_type)] = "fadeapi"
+                
+                if search_type in ["email", "pass"]:
+                    futures[executor.submit(snusbase, query, search_type)] = "snusbase"
+                
+                if search_type == "phone":
+                    futures[executor.submit(fadeapi, query, "phone")] = "fadeapi_phone"
             
             all_data = {}
             for future in as_completed(futures):
@@ -483,7 +484,6 @@ async def create_key(request: Request):
     try:
         master = request.headers.get("X-Master-Key") or request.query_params.get("master_key")
         
-        # Парсим данные из тела запроса, если метод POST
         data = {}
         if request.method == "POST":
             try:
@@ -496,18 +496,14 @@ async def create_key(request: Request):
         if master != MASTER_KEY:
             return render_json({"error": "Unauthorized."}, 401)
         
-        username = data.get("username") or data.get("user")
         global ALLOWED_KEYS
         
-        if username:
-            clean_username = username.lstrip('@').strip()
+        # Ключи всегда создаются в формате Router:Gve8Nw8B
+        random_part = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(8))
+        new_key = f"Router:{random_part}"
+        while new_key in ALLOWED_KEYS:
             random_part = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(8))
-            new_key = f"{clean_username}:{random_part}"
-            while new_key in ALLOWED_KEYS:
-                random_part = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(8))
-                new_key = f"{clean_username}:{random_part}"
-        else:
-            new_key = f"sk_{secrets.token_hex(12)}"
+            new_key = f"Router:{random_part}"
         
         expires_at_str = data.get("expires_at")
         rate_limit = data.get("rate_limit", 1000)

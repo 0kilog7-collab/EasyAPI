@@ -28,6 +28,7 @@ OFDATA_BASE = "https://api.ofdata.ru/v2"
 INFINITY_KEY = "N7xQ4Lp2ZWk8F5VcD1mR9H6TyU3E0BJa"
 INFINITY_URL = "https://infinity-search.fun/find.php"
 
+# Скрытый/демо-ключ SEON для безопасности
 SEON_KEY = "758f5f54-befb-4125-bd17-931689af6633"
 SEON_URL = "https://api.seon.io/SeonRestService/phone-api/v2"
 
@@ -121,35 +122,63 @@ def is_ip_banned(ip):
 def ban_ip(ip, days=30):
     banned_ips[ip] = datetime.now() + timedelta(days=days)
 
-def check_auth(request: Request):
+async def check_auth(request: Request):
     ip = get_real_ip(request)
+    
+    # 1. Сначала ищем в заголовках или параметрах запроса
     auth_key = request.headers.get("X-API-Key") or request.query_params.get("api_key")
     
+    # 2. Если запрос POST и ключ не найден, пробуем прочитать его из JSON-тела
+    if not auth_key and request.method == "POST":
+        try:
+            body = await request.json()
+            auth_key = body.get("api_key") or body.get("X-API-Key")
+        except Exception:
+            pass
+    
+    # Проверка на бан IP
+    is_blocked = False
     if is_ip_banned(ip):
-        return False
-    
-    if ip in failed_attempts and failed_attempts[ip] >= 15:
+        is_blocked = True
+    elif ip in failed_attempts and failed_attempts[ip] >= 15:
         ban_ip(ip, 30)
-        return False
+        is_blocked = True
     
+    # Если ключ не предоставлен вообще
     if not auth_key:
         failed_attempts[ip] = failed_attempts.get(ip, 0) + 1
         return False
     
+    # 3. Валидация мастер-ключа (игнорирует бан IP)
     if auth_key == MASTER_KEY:
         failed_attempts[ip] = 0
+        if ip in banned_ips:
+            del banned_ips[ip]
         return True
     
+    # 4. Валидация обычных ключей (игнорирует бан IP, если ключ верен)
     if auth_key in ALLOWED_KEYS:
         expires_at_str = ALLOWED_KEYS[auth_key].get("expires_at")
         if expires_at_str:
-            expires_at = datetime.strptime(expires_at_str, "%Y-%m-%d %H:%M:%S")
-            if datetime.now() > expires_at:
-                write_to_log(f"[EXPIRED LOG] [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Ключ '{auth_key}' заблокирован ({expires_at_str}).")
-                return False
+            try:
+                if "T" in expires_at_str:
+                    expires_at = datetime.fromisoformat(expires_at_str)
+                else:
+                    expires_at = datetime.strptime(expires_at_str, "%Y-%m-%d %H:%M:%S")
+                
+                if datetime.now() > expires_at:
+                    write_to_log(f"[EXPIRED LOG] [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Ключ '{auth_key}' заблокирован ({expires_at_str}).")
+                    return False
+            except Exception as e:
+                write_to_log(f"[DATE ERROR] Не удалось распарсить дату '{expires_at_str}': {e}")
+        
+        # Сбрасываем блокировки для валидного ключа
         failed_attempts[ip] = 0
+        if ip in banned_ips:
+            del banned_ips[ip]
         return True
     
+    # Неверный ключ
     failed_attempts[ip] = failed_attempts.get(ip, 0) + 1
     return False
 
@@ -368,7 +397,8 @@ def tg_osint_get_history(query):
 @app.api_route("/search", methods=["GET", "POST"])
 async def search(request: Request):
     try:
-        if not check_auth(request):
+        # Важно: используем await перед асинхронной функцией проверки
+        if not await check_auth(request):
             ip = get_real_ip(request)
             if is_ip_banned(ip):
                 return render_json({"error": "Your IP is banned for 30 days."}, 403)
@@ -452,11 +482,14 @@ async def search(request: Request):
 async def create_key(request: Request):
     try:
         master = request.headers.get("X-Master-Key") or request.query_params.get("master_key")
+        
+        # Парсим данные из тела запроса, если метод POST
+        data = {}
         if request.method == "POST":
             try:
                 data = await request.json()
             except:
-                data = {}
+                pass
             if not master:
                 master = data.get("master_key")
         

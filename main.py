@@ -8,8 +8,6 @@ import secrets
 import string
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import asyncio
-import httpx
 import uvicorn
 
 app = FastAPI()
@@ -413,21 +411,17 @@ async def search(request: Request):
         with ThreadPoolExecutor(max_workers=8) as executor:
             futures = {}
             
-            # Универсальные API
             futures[executor.submit(depsearch, query)] = "depsearch"
             futures[executor.submit(cryven_search, query)] = "cryven"
             futures[executor.submit(bigbase_search, query)] = "bigbase"
             futures[executor.submit(fadeapi, query, search_type)] = "fadeapi"
             
-            # Email / Pass
             if search_type in ["email", "pass"]:
                 futures[executor.submit(snusbase, query, search_type)] = "snusbase"
             
-            # Phone
             if search_type == "phone":
                 futures[executor.submit(fadeapi, query, "phone")] = "fadeapi_phone"
             
-            # Telegram
             if search_type in ["telegram", "username"]:
                 clean = query.replace("@", "").strip()
                 futures[executor.submit(quickflow_search, clean)] = "quickflow"
@@ -545,11 +539,12 @@ async def home():
         "version": "2.0",
         "endpoints": {
             "/search": "GET/POST - универсальный поиск",
-            "Нашли баги? Пишите",
-            "баги: Пофикшены, поиск работает ♡",
-            "Приятного пользования!",
-            "/health" Статус API"
-        }
+            "/master/keys": "POST - создать ключ",
+            "/master/keys/{key}": "DELETE - удалить ключ",
+            "/master/keys/list": "GET - список ключей",
+            "/health": "GET - статус"
+        },
+        "message": "Нашли баги? Пишите @y3Huk_iphone. Баги пофикшены, поиск работает ♡. Приятного пользования!"
     })
 
 if __name__ == "__main__":

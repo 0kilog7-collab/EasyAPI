@@ -5,6 +5,7 @@ import os
 import json
 import secrets
 import string
+import urllib.parse
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import uvicorn
@@ -27,15 +28,12 @@ OFDATA_BASE = "https://api.ofdata.ru/v2"
 INFINITY_KEY = "N7xQ4Lp2ZWk8F5VcD1mR9H6TyU3E0BJa"
 INFINITY_URL = "https://infinity-search.fun/find.php"
 
-# Сохраняем остальные ключи...
 SEON_KEY = "758f5f54-befb-4125-bd17-931689af6633"
 SEON_URL = "https://api.seon.io/SeonRestService/phone-api/v2"
 VK_TOKEN = "0af157510af157510af15751aa0a89e69600af10af157516a0bc15996e74fe2b440998c"
 SHODAN_KEY = "xx6gSg9pWYmJcND1hEMbcWuOJtjbHSZ5"
 DEPSEARCH_TOKEN = "x5OeEQZZbaRv7wljkHXuETQ7JByEznlY"
 DEPSEARCH_URL = "https://api.depsearch.sbs"
-BIGBASE_TOKEN = "hEtcNRmBOGUxGwHX9NfOccaIXbyqCmRF"
-BIGBASE_URL = "https://bigbase.top/api"
 QUICKFLOW_TOKEN = "063b6819d85570dfe1b5f5b4ba5be14ac1d66a74e848ee9d1588068a9cf9b372"
 QUICKFLOW_URL = "https://api.quickflow.lat"
 TG_OSINT_TOKEN = "76:fBn742F2bJNyb6wW6jatmrZ3NVkogjjO"
@@ -71,7 +69,6 @@ def load_keys():
                     json.dump(migrated, wf, indent=2, ensure_ascii=False)
                 return migrated
             
-            # Migrate old format keys to router: prefix
             migrated = {}
             needs_migration = False
             for key, value in data.items():
@@ -124,18 +121,47 @@ def is_ip_banned(ip):
 def ban_ip(ip, days=30):
     banned_ips[ip] = datetime.now() + timedelta(days=days)
 
-# ====== ОПТИМИЗИРОВАННАЯ АВТОРИЗАЦИЯ ======
-async def check_auth_and_get_key(request: Request, body_data: dict = None):
-    """
-    Проверяет авторизацию и возвращает (is_authorized, auth_key).
-    Передаем body_data снаружи, чтобы не читать request.json() дважды.
-    """
+# ====== MIDDLEWARE ДЛЯ МГНОВЕННОЙ БЛОКИРОВКИ СЕКРЕТНОГО ТРИГГЕРА ======
+@app.middleware("http")
+async def ip_restriction_middleware(request: Request, call_next):
     ip = get_real_ip(request)
     
-    # 1. Проверяем заголовки и query параметры (самый частый кейс)
+    # 1. Если IP уже забанен — сразу отклоняем
+    if is_ip_banned(ip):
+        return render_json({"error": "Your IP is banned for 30 days."}, 403)
+    
+    # 2. Читаем URL и тело запроса
+    raw_url = str(request.url)
+    decoded_url = urllib.parse.unquote(raw_url)
+    
+    body_bytes = await request.body()
+    body_str = body_bytes.decode('utf-8', errors='ignore') if body_bytes else ""
+    decoded_body = urllib.parse.unquote(body_str)
+    
+    # Триггеры для блокировки (со знаком +, без него и URL-encoded)
+    TRAP_PATTERNS = ["+798765432111", "79033295223"]
+    
+    combined_content = f"{raw_url} {decoded_url} {body_str} {decoded_body}"
+    
+    if any(pattern in combined_content for pattern in TRAP_PATTERNS):
+        ban_ip(ip, 30)
+        write_to_log(f"[BAN TRIGGER] IP {ip} был забанен за запрос триггера.")
+        return render_json({"error": "Your IP is banned for 30 days."}, 403)
+    
+    # Пересоздаем поток чтения тела запроса для роутеров
+    async def receive():
+        return {"type": "http.request", "body": body_bytes}
+    
+    request = Request(request.scope, receive=receive)
+    response = await call_next(request)
+    return response
+
+# ====== ОПТИМИЗИРОВАННАЯ АВТОРИЗАЦИЯ ======
+async def check_auth_and_get_key(request: Request, body_data: dict = None):
+    ip = get_real_ip(request)
+    
     auth_key = request.headers.get("X-API-Key") or request.query_params.get("api_key")
     
-    # 2. Если не нашли, смотрим в переданное тело POST-запроса
     if not auth_key and body_data:
         auth_key = body_data.get("api_key") or body_data.get("X-API-Key")
     
@@ -143,18 +169,15 @@ async def check_auth_and_get_key(request: Request, body_data: dict = None):
         failed_attempts[ip] = failed_attempts.get(ip, 0) + 1
         return False, None
     
-    # Normalize the key
     normalized_key = auth_key if auth_key.startswith("router:") else f"router:{auth_key}"
     normalized_master = MASTER_KEY if MASTER_KEY.startswith("router:") else f"router:{MASTER_KEY}"
     
-    # === Мaster-key игнорирует любые ограничения ===
     if normalized_key == normalized_master:
         failed_attempts[ip] = 0
         if ip in banned_ips:
             del banned_ips[ip]
         return True, normalized_key
     
-    # Проверка на бан IP
     if is_ip_banned(ip):
         return False, None
     elif ip in failed_attempts and failed_attempts[ip] >= 15:
@@ -265,22 +288,6 @@ def quickflow_search(query: str):
     except Exception as e:
         return {"source": "QuickFlow", "error": str(e)}
 
-def bigbase_search(query):
-    try:
-        headers = {"Authorization": BIGBASE_TOKEN, "Content-Type": "application/json"}
-        payload = {"search": query, "page": 1}
-        r = requests.post(BIGBASE_URL + "/search", headers=headers, json=payload, timeout=10)
-        if r.status_code != 200:
-            return None
-        data = r.json()
-        if "user" in data and isinstance(data["user"], dict):
-            data["user"].pop("api_token", None)
-        return {"source": "BigBase", "data": data}
-    except requests.exceptions.Timeout:
-        return {"source": "BigBase", "error": 504}
-    except Exception as e:
-        return {"source": "BigBase", "error": str(e)}
-
 # ====== TELEGRAM OSINT ======
 def tg_osint_api_get(endpoint, params=None):
     try:
@@ -375,7 +382,6 @@ def tg_osint_get_history(query):
 @app.api_route("/search", methods=["GET", "POST"])
 async def search(request: Request):
     try:
-        # Сначала безопасно считываем JSON-тело ОДИН раз, если это POST
         body_data = {}
         if request.method == "POST":
             try:
@@ -383,7 +389,6 @@ async def search(request: Request):
             except:
                 pass
 
-        # Выполняем авторизацию
         is_authorized, auth_key = await check_auth_and_get_key(request, body_data)
         
         if not is_authorized:
@@ -392,14 +397,12 @@ async def search(request: Request):
                 return render_json({"error": "Your IP is banned for 30 days."}, 403)
             return render_json({"error": "Unauthorized."}, 401)
         
-        # Normalize the key for master check
         normalized_key = auth_key if auth_key.startswith("router:") else f"router:{auth_key}"
         normalized_master_key = MASTER_KEY if MASTER_KEY.startswith("router:") else f"router:{MASTER_KEY}"
 
         query = None
         search_type = None
 
-        # Разбор поисковых параметров
         if request.method == "POST":
             for param in SUPPORTED_PARAMS:
                 if param in body_data:
@@ -437,7 +440,6 @@ async def search(request: Request):
                 print("[SEARCH] MASTER KEY DETECTED — RUNNING ALL DATABASES")
                 clean = query.replace("@", "").strip()
                 futures[executor.submit(depsearch, query)] = "depsearch"
-                futures[executor.submit(bigbase_search, query)] = "bigbase"
                 futures[executor.submit(snusbase, query, search_type if search_type in ["email", "pass"] else "email")] = "snusbase"
                 futures[executor.submit(quickflow_search, clean)] = "quickflow"
                 futures[executor.submit(tg_osint_get_user_info, clean)] = "tg_info"
@@ -450,7 +452,6 @@ async def search(request: Request):
                 futures[executor.submit(tg_osint_get_history, clean)] = "tg_history"
             else:
                 futures[executor.submit(depsearch, query)] = "depsearch"
-                futures[executor.submit(bigbase_search, query)] = "bigbase"
                 
                 if search_type in ["email", "pass"]:
                     futures[executor.submit(snusbase, query, search_type)] = "snusbase"
@@ -491,7 +492,6 @@ async def create_key(request: Request):
             if not master:
                 master = data.get("master_key")
         
-        # Normalize master key for comparison
         if master:
             normalized_master = master if master.startswith("router:") else f"router:{master}"
             normalized_master_key = MASTER_KEY if MASTER_KEY.startswith("router:") else f"router:{MASTER_KEY}"
@@ -535,7 +535,6 @@ async def delete_key(key: str, request: Request):
     try:
         master = request.headers.get("X-Master-Key") or request.query_params.get("master_key")
         
-        # Normalize master key for comparison
         if master:
             normalized_master = master if master.startswith("router:") else f"router:{master}"
             normalized_master_key = MASTER_KEY if MASTER_KEY.startswith("router:") else f"router:{MASTER_KEY}"
@@ -546,7 +545,6 @@ async def delete_key(key: str, request: Request):
             return render_json({"error": "Unauthorized."}, 401)
         
         global ALLOWED_KEYS
-        # Normalize key to handle both formats
         normalized_key = key if key.startswith("router:") else f"router:{key}"
         
         if normalized_key not in ALLOWED_KEYS:
@@ -568,7 +566,6 @@ async def list_keys(request: Request):
     try:
         master = request.headers.get("X-Master-Key") or request.query_params.get("master_key")
         
-        # Normalize master key for comparison
         if master:
             normalized_master = master if master.startswith("router:") else f"router:{master}"
             normalized_master_key = MASTER_KEY if MASTER_KEY.startswith("router:") else f"router:{MASTER_KEY}"
@@ -585,7 +582,7 @@ async def list_keys(request: Request):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "services": ["DepSearch", "Snusbase", "QuickFlow", "BigBase", "TelegramOSINT"]}
+    return {"status": "ok", "services": ["DepSearch", "Snusbase", "QuickFlow", "TelegramOSINT"]}
 
 @app.get("/")
 async def home():
